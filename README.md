@@ -10,9 +10,10 @@ And the overall directory structure is as follows.
 ```
 PartialConvolution/
                  ┣ experiment/
-                 ┃    ┣ logs/
-                 ┃    ┣ losses/
-                 ┃    ┗ test_samples/
+                 ┃    ┗ KLPConv_logs
+                 ┃        ┣ logs/
+                 ┃        ┣ losses/
+                 ┃        ┗ test_samples/
                  ┣ data/
                  ┃    ┗ dataSet/
                  ┣ libs/
