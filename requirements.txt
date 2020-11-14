@@ -12,3 +12,4 @@ tables==3.4.4
 tensorboard==1.13.1
 tensorflow==1.13.1
 tqdm==4.28.1
+opencv-python==3.4.9.33
