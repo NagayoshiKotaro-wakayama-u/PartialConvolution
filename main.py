@@ -60,6 +60,9 @@ def parse_args():
     parser.add_argument('-train', '--train', type=str, default="", help='Folder with training images')
     parser.add_argument('-valid', '--validation', type=str, default="", help='Folder with validation images')
     parser.add_argument( '-test', '--test', type=str, default="", help='Folder with testing images')
+    parser.add_argument('-trainmask', '--trainmask', type=str, default="", help='Folder with training mask images')
+    parser.add_argument('-validmask', '--validmask', type=str, default="", help='Folder with validation mask images')
+    parser.add_argument( '-testmask', '--testmask', type=str, default="", help='Folder with testing mask images')
     parser.add_argument('-checkpoint', '--checkpoint',type=str, help='Previous weights to be loaded onto model')
     parser.add_argument('-KLthre', '--KLthre',type=float, default=0.1,help='threshold value of KLloss')
     parser.add_argument('-KLoff','--KLoff',action='store_false',help="Flag for not using KL-loss function")
@@ -96,7 +99,7 @@ class LossHistory(Callback):
     def __init__(self,savepath):
         if not os.path.isdir(savepath):
             os.makedirs(savepath)
-        self.path = os.path.join(savepath,"losses.pickle")
+        self.path = os.path.join(savepath,"training_losses.pickle")
         self.KL = []
         self.PSNR = []
         self.totalLoss = []
@@ -114,8 +117,20 @@ class LossHistory(Callback):
             "PSNR":np.array(self.PSNR),
             "Total":np.array(self.totalLoss)
         }
+
         with open(self.path,"wb") as f:
             pickle.dump(summary,f)
+
+        types = ["Total","PSNR","KL"]
+        for lossName in types:
+            loss = summary[lossName]
+            plt.plot(range(epochs*steps_per_epoch),loss)
+            plt.xlabel('Iteration (1epoch={}ite)'.format(steps_per_epoch))
+            plt.ylabel(lossName)
+            plt.title(args.experiment)
+            plt.savefig(os.path.join(loss_path,lossName+".png"))
+            plt.close()
+
 
 # Run script
 if __name__ == '__main__':
@@ -140,42 +155,46 @@ if __name__ == '__main__':
 
     dataset = "dataSet-r0.0" # データセットのディレクトリ
     dspath = ".{0}data{0}{1}{0}".format(os.sep,dataset)
-    maskpath = dspath+"train_mask" # マスク画像のディレクトリ
     
     TRAIN_DIR = dspath+"train"+os.sep if args.train=="" else args.train
+    TRAIN_MASK = dspath+"train_mask" if args.trainmask=="" else args.trainmask
     valid_num = 36 # validationデータのデータ数
     VALID_DIR = dspath+"valid"+os.sep if args.validation=="" else args.valid
+    VALID_MASK = dspath+"valid_mask" if args.validmask=="" else args.validmask
     TEST_DIR = dspath+"test"+os.sep if args.test=="" else args.test
+    TEST_MASK = dspath+"test_mask" if args.testmask=="" else args.testmask
     img_w = 512
     img_h = 512
     shape = (img_h, img_w)
-    mask_generator = MaskGenerator(img_h,img_w,channels=1,rand_seed=42,filepath=maskpath)
     sea = np.array(Image.open(".{0}data{0}sea.png".format(os.sep)))/255 # 海洋部を除くマスク
     sea_rgb = np.tile(sea[:,:,np.newaxis],(1,1,3)) # カラーで可視化する際に海洋部を除くマスク
 
     # Create training generator
     train_datagen = AugmentingDataGenerator(rescale=1./255)
+    train_mask_gen = MaskGenerator(img_h,img_w,channels=1,rand_seed=42,filepath=TRAIN_MASK)
     train_generator = train_datagen.flow_from_directory(
         TRAIN_DIR,
-        mask_generator,
+        train_mask_gen,
         target_size=shape, 
         batch_size=batchsize
     )
 
     # Create validation generator
     val_datagen = AugmentingDataGenerator(rescale=1./255)
+    valid_mask_gen = MaskGenerator(img_h,img_w,channels=1,rand_seed=42,filepath=VALID_MASK)
     val_generator = val_datagen.flow_from_directory(
         VALID_DIR,
-        mask_generator, 
+        valid_mask_gen, 
         target_size=shape, 
         batch_size=1
     )
 
     # Create testing generator
     test_datagen = AugmentingDataGenerator(rescale=1./255)
+    test_mask_gen = MaskGenerator(img_h,img_w,channels=1,rand_seed=42,filepath=TEST_MASK)
     test_generator = test_datagen.flow_from_directory(
         TEST_DIR,
-        mask_generator,
+        test_mask_gen,
         target_size=shape, 
         batch_size=1
     )
