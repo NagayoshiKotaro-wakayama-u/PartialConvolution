@@ -6,13 +6,11 @@ import pdb
 
 import tensorflow as tf
 from keras.models import Model
-from keras.models import load_model
 from keras.optimizers import Adam
 from keras.layers import Input, Conv2D, UpSampling2D, Dropout, LeakyReLU, BatchNormalization, Activation, Lambda
 from keras.layers.merge import Concatenate
 from keras import backend as K
 from keras.utils.multi_gpu_utils import multi_gpu_model
-from keras.losses import kullback_leibler_divergence as KLdiv
 
 from libs.pconv_layer import PConv2D
 from PIL import Image

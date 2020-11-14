@@ -2,12 +2,10 @@ import os
 import gc
 import datetime
 import numpy as np
-import pandas as pd
 import cv2
 import pdb
 import glob
 import sys
-import shutil
 
 from argparse import ArgumentParser
 from copy import deepcopy
@@ -22,13 +20,11 @@ from keras_tqdm import TQDMCallback
 import matplotlib
 #matplotlib.use('Agg')
 from matplotlib import pyplot as plt
-from matplotlib.ticker import NullFormatter
 from PIL import Image
 
 from libs.pconv_model import PConvUnet
 from libs.util import MaskGenerator,ImageChunker
 
-from sklearn.decomposition import PCA
 import pickle
 import cv2
 

@@ -1,6 +1,5 @@
 import os
 from random import randint, seed
-import itertools
 import numpy as np
 import cv2
 
