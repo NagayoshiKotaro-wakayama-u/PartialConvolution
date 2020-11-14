@@ -6,7 +6,7 @@ To start training run this command. (xxxx is name of experiment)
 For example `python main.py KLPConv`.  
   
 The following directory `experiment` is automatically created when you run this command.
-And the overall directory structure is as follows.
+And the overall directory structure is as follows. (dataSet must be prepared by you)
 ```
 PartialConvolution/
                  ┣ experiment/
@@ -16,6 +16,15 @@ PartialConvolution/
                  ┃        ┗ test_samples/
                  ┣ data/
                  ┃    ┗ dataSet/
+                 ┃        ┣ train/
+                 ┃        ┃   ┗ train_img/
+                 ┃        ┣ train_mask/
+                 ┃        ┣ test/
+                 ┃        ┃   ┗ test_img/
+                 ┃        ┣ test_mask/
+                 ┃        ┣ valid/
+                 ┃        ┃   ┗ valid_img/
+                 ┃        ┗ valid_mask/
                  ┣ libs/
                  ┃    ┣ pconv_layer.py
                  ┃    ┣ pconv_model.py
