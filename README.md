@@ -1,5 +1,13 @@
 # PartialConvolution
 
+
+## generateToyData.py
+To generate ToyData run this command. 
+`python generateToyData.py`
+Then 1500 training images and 100 validation images, 100 test images (and each mask images) are generated. 
+An example are below.
+![sample image](./0000.png "サンプル")
+
 ## main.py  
 To start training run this command. (xxxx is name of experiment)  
 `python main.py xxxx`  
