@@ -30,7 +30,8 @@ PartialConvolution/
                  ┃    ┣ pconv_model.py
                  ┃    ┗ util.py
                  ┣ main.py
-                 ┗ test.py
+                 ┣ test.py
+                 ┗ generateToyData.py
 ```
   
 If you want to try normal PartialConvolution, use `-KLoff` option.  
