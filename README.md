@@ -1,7 +1,7 @@
 # PartialConvolution
 
 ## generateToyData.py
-To generate ToyData run this command.   
+To generate ToyData, run this command.   
 `python generateToyData.py`  
 Then 1500 training images and 100 validation images, 100 test images (and each mask images) are generated.   
   
@@ -11,11 +11,11 @@ Then 1500 training images and 100 validation images, 100 test images (and each m
 Number of images are able to be changed by `-train` and `-valid`, `-test` option.  
 For example `python generateToyData.py -train 5000 -valid 500 -test 500`  
   
-You can get more details, use `-h` option.  
+If you want to get more details, use `-h` option.  
 `python generateToyData.py -h`  
 
 ## main.py  
-To start training run this command. (xxxx is name of experiment)  
+To start training, run this command. (xxxx is name of experiment)  
 `python main.py xxxx`  
 For example `python main.py hogehoge`.  
   
@@ -48,17 +48,17 @@ PartialConvolution/
                  ┗ generateToyData.py
 ```
   
-If you want to try normal PartialConvolution, use `-KLoff` option.  
+To train normal PartialConvolution model, use `-KLoff` option.  
 `python main.py xxxx -KLoff`  
   
-You can get more details, use `-h` option.   
+If you want to get more details, use `-h` option.   
 `python main.py -h`  
   
   
 ## test.py  
 After training, run this command to test the model.  
 `python test.py xxxx yyyy`  
-xxxx is name of experiment. yyyy is name of the weight file to be loaded.  
+xxxx is the name of experiment. yyyy is the name of the weight file to be loaded.  
 For example
 `python test.py KLPConv weights.100-0.13.h5`
   
@@ -68,7 +68,12 @@ The directory `result` is automatically created under `experiment` when you run 
 The directory `comparison` (under `result`) is contained some analysis.   
   
 ↓comparison example↓  
-<img src="./data/sample_comparison.png" width="256px">  
+<img src="./data/sample_comparison.png" width="360px">  
   
-You can get more details, use `-h` option.  
+The top row is ordered from left to right: input, prediction, and ground truth.  
+And the middle row is each histogram (Horizontal axis is pixel value and vertical axis is frequency).  
+The middle of the bottom row shows deviation from the ground truth (positive values are red and negative values are blue).  
+The right of the bottom row plots MAE of each pixel values (Horizontal axis is pixel value and vertical axis is MAE).  
+  
+If you want to get more details, use `-h` option.  
   
