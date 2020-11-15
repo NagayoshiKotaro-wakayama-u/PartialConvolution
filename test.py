@@ -117,6 +117,7 @@ def parse_args():
     parser = ArgumentParser(description="学習済みのパラメータでテストをし、真値との比較や分析結果の保存を行います")
     parser.add_argument('dir_name',help="実験名(ログファイルのディレクトリ名でxxxx_logsのxxxxの部分のみ)")
     parser.add_argument('model',help="学習済みのweightのファイル名(例：weights.150-0.13.h5)")
+    parser.add_argument('-dataset','--dataset',type=str,default='gaussianToyData',help="データセットのディレクトリ名")
     parser.add_argument('-thre','--pcv_thre', type=float, default=0.2, help="固有ベクトル計算時の閾値")
     parser.add_argument('-test','--test',type=str,default="", help="テスト画像のパス")
 
@@ -126,7 +127,7 @@ def parse_args():
 if __name__ == "__main__":
 
     args = parse_args()
-    dspath = "dataSet-r0.0"
+    dspath = args.dataset
     pcv_thre = args.pcv_thre
     test_imgs_path = ".{0}data{0}{1}{0}test{0}test_img{0}*.png".format(os.sep,dspath) if args.test=="" else args.test
 
