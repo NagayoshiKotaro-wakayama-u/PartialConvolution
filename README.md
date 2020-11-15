@@ -6,7 +6,7 @@ To generate ToyData run this command.
 Then 1500 training images and 100 validation images, 100 test images (and each mask images) are generated.   
   
 ↓ToyData example↓  
-<img src="./0000.png" width="256px">  
+<img src="./data/sample.png" width="256px">  
   
 Number of images are able to be changed by `-train` and `-valid`, `-test` option.  
 For example `python generateToyData.py -train 5000 -valid 500 -test 500`  
