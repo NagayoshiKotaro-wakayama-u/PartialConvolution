@@ -34,7 +34,6 @@ def cmap(x,sta=[222,222,222],end=[255,0,0]): #x:gray-image([w,h]) , sta,end:[B,G
             tmp.append(np.array(sta)+x[i,j]*vec)
         res.append(tmp)
     res = np.array(res).astype("uint8")
-    res[sea_rgb==0] = 255
     return res
 
 def calcPCV1(x,pcv_thre=0.2): # 第一主成分ベクトルを導出し，
@@ -56,6 +55,7 @@ def calcPCV1(x,pcv_thre=0.2): # 第一主成分ベクトルを導出し，
 def parse_args():
     parser = ArgumentParser(description='Training script for PConv inpainting')
     parser.add_argument('experiment',type=str,help='name of experiment, e.g. \'normal_PConv\'')
+    parser.add_argument('-dataset','--dataset',type=str,default='gaussianToyData',help='name of dataset directory (default=gaussianToyData)')
     parser.add_argument('-stage', '--stage',type=str, default='train', help='Which stage of training to run', choices=['train', 'finetune'])
     parser.add_argument('-train', '--train', type=str, default="", help='Folder with training images')
     parser.add_argument('-valid', '--validation', type=str, default="", help='Folder with validation images')
@@ -66,7 +66,7 @@ def parse_args():
     parser.add_argument('-checkpoint', '--checkpoint',type=str, help='Previous weights to be loaded onto model')
     parser.add_argument('-KLthre', '--KLthre',type=float, default=0.1,help='threshold value of KLloss')
     parser.add_argument('-KLoff','--KLoff',action='store_false',help="Flag for not using KL-loss function")
-    parser.add_argument('-epochs','--epochs',type=int,default=150,help='training epoch')
+    parser.add_argument('-epochs','--epochs',type=int,default=100,help='training epoch')
         
     return  parser.parse_args()
 
@@ -150,15 +150,15 @@ if __name__ == '__main__':
 
     epochs = args.epochs
     # 以下はデータ数やメモリサイズに合わせて調整
-    steps_per_epoch = 99 # 1エポック内のiterationの数
-    batchsize = 3 # バッチサイズ
+    steps_per_epoch = 300 # 1エポック内のiterationの数
+    batchsize = 5 # バッチサイズ
+    valid_num = 100 # validationデータのデータ数
 
-    dataset = "dataSet-r0.0" # データセットのディレクトリ
+    dataset = args.dataset # データセットのディレクトリ
     dspath = ".{0}data{0}{1}{0}".format(os.sep,dataset)
     
     TRAIN_DIR = dspath+"train"+os.sep if args.train=="" else args.train
     TRAIN_MASK = dspath+"train_mask" if args.trainmask=="" else args.trainmask
-    valid_num = 36 # validationデータのデータ数
     VALID_DIR = dspath+"valid"+os.sep if args.validation=="" else args.valid
     VALID_MASK = dspath+"valid_mask" if args.validmask=="" else args.validmask
     TEST_DIR = dspath+"test"+os.sep if args.test=="" else args.test
@@ -166,8 +166,6 @@ if __name__ == '__main__':
     img_w = 512
     img_h = 512
     shape = (img_h, img_w)
-    sea = np.array(Image.open(".{0}data{0}sea.png".format(os.sep)))/255 # 海洋部を除くマスク
-    sea_rgb = np.tile(sea[:,:,np.newaxis],(1,1,3)) # カラーで可視化する際に海洋部を除くマスク
 
     # Create training generator
     train_datagen = AugmentingDataGenerator(rescale=1./255)
@@ -245,7 +243,7 @@ if __name__ == '__main__':
     history = LossHistory(loss_path)
     
     # Build the model
-    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL=True,exist_point_file=".{0}data{0}sea.png".format(os.sep))
+    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL=True)
     
     # Loading of checkpoint（デフォルトではロードせずに初めから学習する）
     if args.checkpoint:

@@ -64,7 +64,7 @@ def cmap(x,sta=[222,222,222],end=[255,0,0]): #x:gray-image([w,h]) , sta,end:[B,G
             tmp.append(np.array(sta)+x[i,j]*vec)
         res.append(tmp)
     res = np.array(res).astype("uint8")
-    res[sea_rgb==0] = 255
+    res[exist_rgb==0] = 255
     return res
 
 def calcPCV1(x):
@@ -128,17 +128,18 @@ if __name__ == "__main__":
     args = parse_args()
     dspath = "dataSet-r0.0"
     pcv_thre = args.pcv_thre
-    test_imgs_path = ".{0}data{0}{1}{0}test{0}test_amp{0}*.png".format(os.sep,dspath) if args.test=="" else args.test
+    test_imgs_path = ".{0}data{0}{1}{0}test{0}test_img{0}*.png".format(os.sep,dspath) if args.test=="" else args.test
 
     # path
     path = ".{0}experiment{0}{1}_logs{0}".format(os.sep,args.dir_name)
     if not os.path.isdir(path):
         os.makedirs(path)
 
+    shape = (512,512)
     img_files = sorted(glob.glob(test_imgs_path)) # テスト画像のパス取得
     mask_files = sorted(glob.glob(".{0}data{0}{1}{0}test_mask{0}*.png".format(os.sep,dspath))) # テストのマスク画像のパス取得
-    sea = np.array(Image.open(".{0}data{0}sea.png".format(os.sep)))/255 # 海洋部のマスク画像
-    sea_rgb = np.tile(sea[:,:,np.newaxis],(1,1,3)) # 海洋部のマスク画像（カラー画像用）
+    exist = np.ones(shape) # 観測部分が１となる画像(マスク画像とは別の未観測地点がある場合に使用(Toyデータでは使用しないため全て１))
+    exist_rgb = np.tile(exist[:,:,np.newaxis],(1,1,3)) # カラー画像による可視化時に用いる
     BATCH_SIZE = 4
 
     names, imgs, masks = [], [], []
@@ -195,8 +196,8 @@ if __name__ == "__main__":
 
         #================================================
         # 非欠損部分の抽出・誤差の計算
-        gt_nonh = nonhole(img,sea)
-        pred_nonh = nonhole(pred,sea)
+        gt_nonh = nonhole(img,exist)
+        pred_nonh = nonhole(pred,exist)
 
         mae_all = np.mean(np.abs(img-pred))
 
@@ -229,9 +230,9 @@ if __name__ == "__main__":
         # ヒストグラム
         bins = 20
         hs = []
-        hs.append(nonhole(img,mask*sea))
-        hs.append(nonhole(pred,sea))
-        hs.append(nonhole(img,sea))
+        hs.append(nonhole(img,mask*exist))
+        hs.append(nonhole(pred,exist))
+        hs.append(nonhole(img,exist))
         tmp = np.concatenate(hs,axis=0)
         maxs = np.max(tmp)
 
@@ -256,7 +257,7 @@ if __name__ == "__main__":
 
         # AE map
         err = cm_bwr(clip(err,-0.1,0.1))[:,:,:3] # -0.1~0.1の偏差をカラーに変換
-        axes[2,1].imshow(err*sea_rgb,vmin=0,vmax=1.0)
+        axes[2,1].imshow(err*exist_rgb,vmin=0,vmax=1.0)
         
         plt.savefig(os.path.join(compare_path,name))
         plt.close()
@@ -268,7 +269,7 @@ if __name__ == "__main__":
 
         # 主成分分析
         colors = ['g','b','r']
-        pcv = [calcPCV1(masked), calcPCV1(pred*sea), calcPCV1(img)]
+        pcv = [calcPCV1(masked), calcPCV1(pred*exist), calcPCV1(img)]
 
         # 対象の画像と主成分ベクトルを重ねてプロット
         for i,x in enumerate(xs):
@@ -308,7 +309,7 @@ if __name__ == "__main__":
     err = cm_bwr(clip(np.mean(errors,axis=0),-0.1,0.1))[:,:,:3]
 
     _,axes = plt.subplots(1,1,figsize=(6,5))
-    axes.imshow(err*sea_rgb,vmin=0,vmax=1.0)
+    axes.imshow(err*exist_rgb,vmin=0,vmax=1.0)
     plt.savefig(path+"result"+os.sep+"mae_map.png")
     #"""
 
