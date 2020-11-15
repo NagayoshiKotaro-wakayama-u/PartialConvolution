@@ -63,5 +63,12 @@ For example
 `python test.py KLPConv weights.100-0.13.h5`
   
 The directory `result` is automatically created under `experiment` when you run this command.  
+  
+### /result/comparison
+The directory `comparison` (under `result`) is contained some analysis.   
+  
+↓comparison example↓  
+<img src="./data/sample_comparison.png" width="256px">  
+  
 You can get more details, use `-h` option.  
   
