@@ -1,6 +1,5 @@
 import numpy as np
 import cv2
-import pdb
 import os
 import sys
 import random
@@ -9,7 +8,6 @@ from argparse import ArgumentParser
 
 #二次元正規分布の確率密度を返す関数
 def gaussian(x,sigma,mu):
-    #pdb.set_trace()
     #分散共分散行列の行列式
     det = np.linalg.det(sigma)
     #分散共分散行列の逆行列

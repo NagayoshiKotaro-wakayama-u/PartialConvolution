@@ -160,13 +160,12 @@ if __name__ == '__main__':
     VALID_MASK = dspath+"valid_mask" if args.validmask=="" else args.validmask
     TEST_DIR = dspath+"test"+os.sep if args.test=="" else args.test
     TEST_MASK = dspath+"test_mask" if args.testmask=="" else args.testmask
-    train_Num = sum([1 if '.png' in p else 0 for p in glob.glob(TRAIN_DIR+"**",recursive=True)])
+    train_Num = sum([1 if '.png' in p else 0 for p in glob.glob(TRAIN_DIR+"**",recursive=True)]) # 画像の枚数をカウント
     valid_Num = sum([1 if '.png' in p else 0 for p in glob.glob(VALID_DIR+"**",recursive=True)])
     test_Num = sum([1 if '.png' in p else 0 for p in glob.glob(TEST_DIR+"**",recursive=True)])
     img_w = 512
     img_h = 512
     shape = (img_h, img_w)
-    pdb.set_trace()
 
     # バッチサイズはメモリサイズに合わせて調整が必要
     batchsize = 5 # バッチサイズ
@@ -262,7 +261,7 @@ if __name__ == '__main__':
         train_generator, 
         steps_per_epoch=steps_per_epoch,
         validation_data=val_generator,
-        validation_steps=valid_num,
+        validation_steps=valid_Num,
         epochs=epochs,
         verbose=0,
         callbacks=[
