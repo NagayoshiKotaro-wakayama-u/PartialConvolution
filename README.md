@@ -3,19 +3,28 @@
 ## main.py  
 To start training run this command. (xxxx is name of experiment)  
 `python main.py xxxx`  
-For example `python main.py KLPConv`.  
+For example `python main.py hogehoge`.  
   
 The following directory `experiment` is automatically created when you run this command.
-And the overall directory structure is as follows.
+And the overall directory structure is as follows. (dataSet must be prepared by you)
 ```
 PartialConvolution/
                  ┣ experiment/
-                 ┃    ┗ KLPConv_logs
+                 ┃    ┗ hogehoge_logs
                  ┃        ┣ logs/
                  ┃        ┣ losses/
                  ┃        ┗ test_samples/
                  ┣ data/
                  ┃    ┗ dataSet/
+                 ┃        ┣ train/
+                 ┃        ┃   ┗ train_img/
+                 ┃        ┣ train_mask/
+                 ┃        ┣ test/
+                 ┃        ┃   ┗ test_img/
+                 ┃        ┣ test_mask/
+                 ┃        ┣ valid/
+                 ┃        ┃   ┗ valid_img/
+                 ┃        ┗ valid_mask/
                  ┣ libs/
                  ┃    ┣ pconv_layer.py
                  ┃    ┣ pconv_model.py
