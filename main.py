@@ -5,6 +5,7 @@ import numpy as np
 import cv2
 import pickle
 import glob
+import pdb
 
 from argparse import ArgumentParser
 from copy import deepcopy
@@ -49,7 +50,7 @@ def calcPCV1(x,pcv_thre=0.2): # 第一主成分ベクトルを導出し，
         raise Exception("Cov is inf.")
     V,D = np.linalg.eig(Cov)
     vec = D[:,[np.argmax(V)]]
-    line = np.concatenate([vec*-256,vec*256],axis=1) + center
+    line = np.concatenate([vec*-(img_h/2),vec*img_h/2],axis=1) + center
     return center,line
 
 def parse_args():
@@ -149,10 +150,6 @@ if __name__ == '__main__':
             os.makedirs(DIR)
 
     epochs = args.epochs
-    # 以下はデータ数やメモリサイズに合わせて調整
-    steps_per_epoch = 300 # 1エポック内のiterationの数
-    batchsize = 5 # バッチサイズ
-    valid_num = 100 # validationデータのデータ数
 
     dataset = args.dataset # データセットのディレクトリ
     dspath = ".{0}data{0}{1}{0}".format(os.sep,dataset)
@@ -163,9 +160,17 @@ if __name__ == '__main__':
     VALID_MASK = dspath+"valid_mask" if args.validmask=="" else args.validmask
     TEST_DIR = dspath+"test"+os.sep if args.test=="" else args.test
     TEST_MASK = dspath+"test_mask" if args.testmask=="" else args.testmask
+    train_Num = sum([1 if '.png' in p else 0 for p in glob.glob(TRAIN_DIR+"**",recursive=True)])
+    valid_Num = sum([1 if '.png' in p else 0 for p in glob.glob(VALID_DIR+"**",recursive=True)])
+    test_Num = sum([1 if '.png' in p else 0 for p in glob.glob(TEST_DIR+"**",recursive=True)])
     img_w = 512
     img_h = 512
     shape = (img_h, img_w)
+    pdb.set_trace()
+
+    # バッチサイズはメモリサイズに合わせて調整が必要
+    batchsize = 5 # バッチサイズ
+    steps_per_epoch = train_Num//batchsize # 1エポック内のiterationの数
 
     # Create training generator
     train_datagen = AugmentingDataGenerator(rescale=1./255)
