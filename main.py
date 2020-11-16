@@ -37,7 +37,8 @@ def cmap(x,sta=[222,222,222],end=[255,0,0]): #x:gray-image([w,h]) , sta,end:[B,G
     res = np.array(res).astype("uint8")
     return res
 
-def calcPCV1(x,pcv_thre=0.2): # 第一主成分ベクトルを導出し，
+def calcPCV1(x): # 第一主成分ベクトルを導出し
+    pcv_thre=args.KLthre
     x = np.array(np.where(x>pcv_thre))
     if 0 in x.shape:
         return np.array([[0,0]]).T , np.array([[0,0],[0,0]])
@@ -65,7 +66,7 @@ def parse_args():
     parser.add_argument('-validmask', '--validmask', type=str, default="", help='Folder with validation mask images')
     parser.add_argument( '-testmask', '--testmask', type=str, default="", help='Folder with testing mask images')
     parser.add_argument('-checkpoint', '--checkpoint',type=str, help='Previous weights to be loaded onto model')
-    parser.add_argument('-KLthre', '--KLthre',type=float, default=0.1,help='threshold value of KLloss')
+    parser.add_argument('-KLthre', '--KLthre',type=float, default=0.4,help='threshold value of KLloss')
     parser.add_argument('-KLoff','--KLoff',action='store_false',help="Flag for not using KL-loss function")
     parser.add_argument('-epochs','--epochs',type=int,default=100,help='training epoch')
         

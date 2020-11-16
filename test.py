@@ -97,7 +97,7 @@ def analyse(x):#x = [n,d]
 def rangeError(pre,tru,domain=[-1.0,0.0],opt="MA"): # pred:予測値, true:真値 , domain:値域(domain[0]< y <=domain[1])
     # ある値域の真値のみで誤差を測る
 
-    domain = [domain[0]/8,domain[1]/8] # normalyse
+    domain = [domain[0],domain[1]] # normalyse
     inds = np.where(np.logical_and(tru>domain[0],tru<=domain[1])) # 
     if inds[0].shape[0]==0: # 値がない場合はNaN
         return np.NaN
@@ -118,7 +118,7 @@ def parse_args():
     parser.add_argument('dir_name',help="実験名(ログファイルのディレクトリ名でxxxx_logsのxxxxの部分のみ)")
     parser.add_argument('model',help="学習済みのweightのファイル名(例：weights.150-0.13.h5)")
     parser.add_argument('-dataset','--dataset',type=str,default='gaussianToyData',help="データセットのディレクトリ名")
-    parser.add_argument('-thre','--pcv_thre', type=float, default=0.2, help="固有ベクトル計算時の閾値")
+    parser.add_argument('-thre','--pcv_thre', type=float, default=0.4, help="固有ベクトル計算時の閾値")
     parser.add_argument('-test','--test',type=str,default="", help="テスト画像のパス")
 
     return  parser.parse_args()
@@ -170,7 +170,7 @@ if __name__ == "__main__":
     
     errors, maes, mses = [],[],[] # 偏差,MAE,MSE
     centers, lines = [], [] # XY座標による主成分分析時の平均・主成分ベクトル
-    mae0, mae05_2, maes_sep = [],[],[] # 値域ごとのMAE
+    mae0, maes_sep = [],[] # 値域ごとのMAE
     cm_bwr = plt.get_cmap("bwr") # 青から赤へのカラーマップ
 
     # 予測してプロット
@@ -204,7 +204,7 @@ if __name__ == "__main__":
 
         err = pred-img
         mae_grand = np.mean(np.abs(gt_nonh-pred_nonh))
-        mse_grand = np.mean((gt_nonh*8-pred_nonh*8)**2) # MSEは輝度=>応答スペクトルに変換して計算
+        mse_grand = np.mean((gt_nonh-pred_nonh)**2) # MSEは輝度=>応答スペクトルに変換して計算
 
         errors.append(err)
         maes.append(mae_grand)
@@ -212,17 +212,12 @@ if __name__ == "__main__":
 
         #==========================================================================================
         # 入力・予測・真値の比較
-        #"""
         x1 = cmap(masked)
         x1[mask_rgb==0] = 255
-        xs = [x1]
-        titles = ["masked","pred(MAE={0:.4f})".format(mae_grand)]
-        xs.append(cmap(pred))
+        xs = [x1,cmap(pred),cmap(img)]
+        titles = ["masked","pred(MAE={0:.4f})".format(mae_grand),"original"]
 
-        xs.append(cmap(img))
-        titles.append("original")
-
-        
+        #"""
         _, axes = plt.subplots(3, width, figsize=(width*4+2, 15))
         for i,x in enumerate(xs):
             axes[0,i].imshow(x,vmin=0,vmax=255)
@@ -242,18 +237,11 @@ if __name__ == "__main__":
         
         
         # 各震度値ごとのMAE 
-        e0 = rangeError(pred,img,domain=[-1.0,0.0])
-        e05_2 = rangeError(pred,img,domain=[0.5,2.0])
-        sep_errs = [rangeError(pred,img,domain=[i*0.8,(i+1)*0.8]) for i in range(10)]
+        e0 = rangeError(pred,img,domain=[-1.0,0.0]) # 負の値は存在しないので0のみのMAEを計算できる
+        sep_errs = [rangeError(pred,img,domain=[i*0.1,(i+1)*0.1]) for i in range(10)]
         mae0.append(e0)
-        mae05_2.append(e05_2)
         maes_sep.append(sep_errs)
                 
-        # axes[2,0].text(0.2,0.05,"mae0:{0:.4f}".format(e0))
-        # axes[2,0].text(0.2,0.125,"mae0.5_2:{0:.4f}".format(e05_2))
-        # for i,er in enumerate(sep_errs):
-        #     axes[2,0].text(0.2,0.2+i*0.075,"mae{0:.1f}_{1:.1f}:{2:.4f}".format(0.1*i,0.1*(i+1),er))
-
         axes[2,-1].plot(np.array([(i+1)*0.1 for i in range(10)]),sep_errs)
 
         # AE map
@@ -315,17 +303,15 @@ if __name__ == "__main__":
     #"""
 
     #"""
-    # 分析結果
+    # 分析結果の保存・表示
     summary_data = {
         "MAE":np.mean(np.array(maes)),
         "MSE":np.mean(np.array(mses)),
         "MAE0":np.mean(np.array(mae0)),
-        "MAE-sep0.8":np.mean(np.array(maes_sep)),
-        "MAE0.5~2":np.mean(np.array(mae05_2))
+        "MAE-sep0.1":np.mean(np.array(maes_sep))
     }
 
-    print("MSE={0:.8f}".format(summary_data["MSE"]))
-    print("MAE={0:.8f}, MAE0.5~2={1:.8f}".format(summary_data["MAE"],summary_data["MAE0.5~2"]))
+    print("MSE={0:.10f}, MAE={1:.10f}".format(summary_data["MSE"],summary_data["MAE"]))
     
     pkl_path = os.path.join(path,"analysed_data.pickle")
     with open(pkl_path,"wb") as f:
