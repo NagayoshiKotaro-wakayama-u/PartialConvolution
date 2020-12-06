@@ -2,7 +2,96 @@ import os
 from random import randint, seed
 import numpy as np
 import cv2
+import pdb
 
+def rangeError(pre,tru,domain=[-1.0,0.0],opt="MA"): # 欠損部含めた誤差 pred:予測値, true:真値 , domain:値域(domain[0]< y <=domain[1])
+    # ある値域の真値のみで誤差を測る
+    domain = [domain[0],domain[1]] # normalyse
+    inds = np.where(np.logical_and(tru>domain[0],tru<=domain[1])) # 
+    if inds[0].shape[0]==0: # 値がない場合はNaN
+        return np.NaN
+
+    error_ = tru[inds[0],inds[1]]-pre[inds[0],inds[1]]
+    
+    if opt=="MA": # MAE
+        error_ = np.mean(np.abs(error_))
+    elif opt=="MS": # MSE
+        error_ = np.mean(error_**2)
+    elif opt=="A":
+        error_ = np.abs(error_)
+    
+    return error_
+
+def nonhole(x,hole): # 欠損部以外の値を取り出す
+    shape = x.shape
+    flatt = np.reshape(x,(np.product(shape)))
+    holes = np.reshape(hole,(np.product(shape)))
+    tmp = []
+    x,y = [],[]
+    for pix,hole,ite in zip(flatt,holes,[i for i in range(flatt.shape[0])]):
+        if np.sum(hole) < 1e-10:
+            continue
+        tmp.append(pix)
+
+    return np.array(tmp)
+
+def cmap(x,exist_rgb=None,sta=[222,222,222],end=[255,0,0]): #x:gray-image([w,h]) , sta,end:[B,G,R]
+    vec = np.array(end) - np.array(sta)
+    res = []
+    for i in range(x.shape[0]):
+        tmp = []
+        for j in range(x.shape[1]):
+            tmp.append(np.array(sta)+x[i,j]*vec)
+        res.append(tmp)
+    res = np.array(res).astype("uint8")
+    if exist_rgb != None:
+        res[exist_rgb==0] = 255
+    return res
+
+def calcPCV1(x,pcv_thre): # 第一主成分を抽出
+    x = np.array(np.where(x>pcv_thre))
+    if 0 in x.shape:
+        return np.array([[0,0]]).T , np.array([[0,0],[0,0]])
+
+    center = np.mean(x,axis=1)[:,np.newaxis]
+    xCe = x - center
+    Cov = np.cov(xCe,bias=1)
+    if True in np.isnan(Cov):
+        print("nan")
+        pdb.set_trace()
+    elif True in np.isinf(Cov):
+        print("inf")
+        pdb.set_trace()
+    V,D = np.linalg.eig(Cov)
+    vec = D[:,[np.argmax(V)]] # 第一主成分を抽出
+    line = np.concatenate([vec*-256,vec*256],axis=1) + center
+    return center,line
+
+def clip(x,sta=-0.1,end=0.1): # Clip the value
+    x[x<sta] = sta
+    x[x>end] = end
+    dist = end-sta
+    res = (x-sta)/dist
+    return res
+
+def calcLabeledError(errors,labels,opt="MA"):
+    pdb.set_trace()
+    labs = np.array(list(set(labels)))
+    results = [[] for _ in range(labs.shape[0])] # labelの種類だけリストを作成
+
+    for lab,error in zip(labels,errors):
+        ind = np.arange(labs.shape[0])[labs==lab]
+        results[ind].append(np.abs(error)) # ラベル別で誤差を保存
+    pdb.set_trace()
+
+    if opt=="MA": # MAE
+        results = [np.mean(res) for res in results]
+    elif opt=="MS": # MSE
+        results = [np.mean(np.array(res)**2) for res in results]
+    elif opt=="A":
+        results = results
+
+    return results,labs
 
 class MaskGenerator():
 
@@ -102,7 +191,6 @@ class MaskGenerator():
             return self._load_mask()
         else:
             return self._generate_mask()
-
 
 class ImageChunker(object): 
     

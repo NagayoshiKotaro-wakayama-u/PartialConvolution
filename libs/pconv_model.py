@@ -7,7 +7,7 @@ import pdb
 import tensorflow as tf
 from keras.models import Model
 from keras.optimizers import Adam
-from keras.layers import Input, Conv2D, UpSampling2D, Dropout, LeakyReLU, BatchNormalization, Activation, Lambda
+from keras.layers import Input, Conv2D, UpSampling2D, Dropout, LeakyReLU, BatchNormalization, Activation, Lambda, Multiply
 from keras.layers.merge import Concatenate
 from keras import backend as K
 from keras.utils.multi_gpu_utils import multi_gpu_model
@@ -30,7 +30,7 @@ def calcDet(lis,dim):
 
 class PConvUnet(object):
 
-    def __init__(self, img_rows=512, img_cols=512, inference_only=False, net_name='default', gpus=1, KLthre=0.1, isUsedKL=True, exist_point_file=""):
+    def __init__(self, img_rows=512, img_cols=512, inference_only=False, net_name='default', gpus=1, KLthre=0.1, isUsedKL=True, exist_point_file="",exist_flag=False):
         """Create the PConvUnet. If variable image size, set img_rows and img_cols to None
 
         Args:
@@ -53,6 +53,7 @@ class PConvUnet(object):
         self.losses = None
         self.KLthre = KLthre
         self.isUsedKL = isUsedKL
+        self.existFlag = exist_flag
 
         # X座標,Y座標の行列
         self.Xmap = K.constant(np.tile([[i for i in range(self.img_cols)]],(self.img_rows,1))[np.newaxis,:,:,np.newaxis])
@@ -121,7 +122,7 @@ class PConvUnet(object):
         d_conv9, d_mask9 = decoder_layer(d_conv8, d_mask8, e_conv1, e_mask1, 64, 3)
         d_conv10, _ = decoder_layer(d_conv9, d_mask9, inputs_img, inputs_mask, 3, 3, bn=False)
         outputs = Conv2D(1, 1, activation = 'sigmoid', name='outputs_img')(d_conv10)
-
+        
         # Setup the model inputs / outputs
         model = Model(inputs=[inputs_img, inputs_mask], outputs=outputs)
 

@@ -23,68 +23,87 @@ from matplotlib import pyplot as plt
 from PIL import Image
 
 from libs.pconv_model import PConvUnet
-from libs.util import MaskGenerator,ImageChunker
+from libs.util import MaskGenerator,ImageChunker,rangeError,nonhole,cmap,calcPCV1,clip,calcLabeledError
 
 import pickle
 import cv2
 
-def clip(x,sta=-0.1,end=0.1): # Clip the value
-    x[x<sta] = sta
-    x[x>end] = end
-    dist = end-sta
-    res = (x-sta)/dist
-    return res
+# def clip(x,sta=-0.1,end=0.1): # Clip the value
+#     x[x<sta] = sta
+#     x[x>end] = end
+#     dist = end-sta
+#     res = (x-sta)/dist
+#     return res
 
-def nonhole(x,hole,opt=""): # 欠損部以外の値を取り出す
-    shape = x.shape
-    flatt = np.reshape(x,(np.product(shape)))
-    holes = np.reshape(hole,(np.product(shape)))
-    tmp = []
-    x,y = [],[]
-    for pix,hole,ite in zip(flatt,holes,[i for i in range(flatt.shape[0])]):
-        if np.sum(hole) < 1e-10:
-            continue
-        tmp.append(pix)
-        if opt=="xy":
-            x.append(ite//shape[1])
-            y.append(ite%shape[0])
+# def nonhole(x,hole,opt=""): # 欠損部以外の値を取り出す
+#     shape = x.shape
+#     flatt = np.reshape(x,(np.product(shape)))
+#     holes = np.reshape(hole,(np.product(shape)))
+#     tmp = []
+#     x,y = [],[]
+#     for pix,hole,ite in zip(flatt,holes,[i for i in range(flatt.shape[0])]):
+#         if np.sum(hole) < 1e-10:
+#             continue
+#         tmp.append(pix)
+#         if opt=="xy":
+#             x.append(ite//shape[1])
+#             y.append(ite%shape[0])
 
-    if opt=="xy":
-        return np.array(tmp),np.array(x),np.array(y)
+#     if opt=="xy":
+#         return np.array(tmp),np.array(x),np.array(y)
 
-    return np.array(tmp)
+#     return np.array(tmp)
 
 
-def cmap(x,sta=[222,222,222],end=[255,0,0]): #x:gray-image([w,h]) , sta,end:[B,G,R]
-    vec = np.array(end) - np.array(sta)
-    res = []
-    for i in range(x.shape[0]):
-        tmp = []
-        for j in range(x.shape[1]):
-            tmp.append(np.array(sta)+x[i,j]*vec)
-        res.append(tmp)
-    res = np.array(res).astype("uint8")
-    res[exist_rgb==0] = 255
-    return res
+# def cmap(x,sta=[222,222,222],end=[255,0,0]): #x:gray-image([w,h]) , sta,end:[B,G,R]
+#     vec = np.array(end) - np.array(sta)
+#     res = []
+#     for i in range(x.shape[0]):
+#         tmp = []
+#         for j in range(x.shape[1]):
+#             tmp.append(np.array(sta)+x[i,j]*vec)
+#         res.append(tmp)
+#     res = np.array(res).astype("uint8")
+#     res[exist_rgb==0] = 255
+#     return res
 
-def calcPCV1(x):
-    x = np.array(np.where(x>pcv_thre))
-    if 0 in x.shape:
-        return np.array([[0,0]]).T , np.array([[0,0],[0,0]])
+# def calcPCV1(x):
+#     x = np.array(np.where(x>pcv_thre))
+#     if 0 in x.shape:
+#         return np.array([[0,0]]).T , np.array([[0,0],[0,0]])
 
-    center = np.mean(x,axis=1)[:,np.newaxis]
-    xCe = x - center
-    Cov = np.cov(xCe,bias=1)
-    if True in np.isnan(Cov):
-        print("nan")
-        pdb.set_trace()
-    elif True in np.isinf(Cov):
-        print("inf")
-        pdb.set_trace()
-    V,D = np.linalg.eig(Cov)
-    vec = D[:,[np.argmax(V)]]
-    line = np.concatenate([vec*-256,vec*256],axis=1) + center
-    return center,line
+#     center = np.mean(x,axis=1)[:,np.newaxis]
+#     xCe = x - center
+#     Cov = np.cov(xCe,bias=1)
+#     if True in np.isnan(Cov):
+#         print("nan")
+#         pdb.set_trace()
+#     elif True in np.isinf(Cov):
+#         print("inf")
+#         pdb.set_trace()
+#     V,D = np.linalg.eig(Cov)
+#     vec = D[:,[np.argmax(V)]]
+#     line = np.concatenate([vec*-256,vec*256],axis=1) + center
+#     return center,line
+
+# def rangeError(pre,tru,domain=[-1.0,0.0],opt="MA"): # pred:予測値, true:真値 , domain:値域(domain[0]< y <=domain[1])
+#     # ある値域の真値のみで誤差を測る
+
+#     domain = [domain[0],domain[1]] # normalyse
+#     inds = np.where(np.logical_and(tru>domain[0],tru<=domain[1])) # 
+#     if inds[0].shape[0]==0: # 値がない場合はNaN
+#         return np.NaN
+
+#     error_ = tru[inds[0],inds[1]]-pre[inds[0],inds[1]]
+#     if opt=="MA": # MAE
+#         error_ = np.mean(np.abs(error_))
+#     elif opt=="MS": # MSE
+#         error_ = np.mean(error_**2)
+#     elif opt=="A":
+#         error_ = np.abs(error_)
+
+#     return error_
+
 
 
 def analyse(x):#x = [n,d]
@@ -94,25 +113,6 @@ def analyse(x):#x = [n,d]
     means = np.mean(x,axis=0)
     return maxs,mins,means,stds
 
-def rangeError(pre,tru,domain=[-1.0,0.0],opt="MA"): # pred:予測値, true:真値 , domain:値域(domain[0]< y <=domain[1])
-    # ある値域の真値のみで誤差を測る
-
-    domain = [domain[0],domain[1]] # normalyse
-    inds = np.where(np.logical_and(tru>domain[0],tru<=domain[1])) # 
-    if inds[0].shape[0]==0: # 値がない場合はNaN
-        return np.NaN
-
-    error_ = tru[inds[0],inds[1]]-pre[inds[0],inds[1]]
-    if opt=="MA": # MAE
-        error_ = np.mean(np.abs(error_))
-    elif opt=="MS": # MSE
-        error_ = np.mean(error_**2)
-    elif opt=="A":
-        error_ = np.abs(error_)
-
-    return error_
-
-
 def parse_args():
     parser = ArgumentParser(description="学習済みのパラメータでテストをし、真値との比較や分析結果の保存を行います")
     parser.add_argument('dir_name',help="実験名(ログファイルのディレクトリ名でxxxx_logsのxxxxの部分のみ)")
@@ -120,6 +120,7 @@ def parse_args():
     parser.add_argument('-dataset','--dataset',type=str,default='gaussianToyData',help="データセットのディレクトリ名")
     parser.add_argument('-thre','--pcv_thre', type=float, default=0.4, help="固有ベクトル計算時の閾値")
     parser.add_argument('-test','--test',type=str,default="", help="テスト画像のパス")
+    parser.add_argument('-posVar','--isPositionVariant',action='store_true',help='位置によってデータの種類が異なる場合に使用')
 
     return  parser.parse_args()
 
@@ -143,7 +144,7 @@ if __name__ == "__main__":
     exist_rgb = np.tile(exist[:,:,np.newaxis],(1,1,3)) # カラー画像による可視化時に用いる
     BATCH_SIZE = 4
 
-    names, imgs, masks = [], [], []
+    names, imgs, masks, labels = [], [], [], []
 
     for i,fname in enumerate(img_files):
         # normalyse
@@ -184,6 +185,9 @@ if __name__ == "__main__":
         mask_rgb = np.tile(mask,(1,1,3))
         mask = mask[:,:,0]
         img = img[:,:,0]
+        if args.isPositionVariant:
+            label = int(name.split("_")[-1].split(".")[0][-1]) # ラベル番号抽出
+            labels.append(label)
 
         width = 3 # 横のプロット数
 
@@ -258,7 +262,9 @@ if __name__ == "__main__":
 
         # 主成分分析
         colors = ['g','b','r']
-        pcv = [calcPCV1(masked), calcPCV1(pred*exist), calcPCV1(img)]
+        pcv = [calcPCV1(masked,args.pcv_thre)
+        , calcPCV1(pred*exist,args.pcv_thre)
+        , calcPCV1(img,args.pcv_thre)]
 
         # 対象の画像と主成分ベクトルを重ねてプロット
         for i,x in enumerate(xs):
@@ -310,6 +316,13 @@ if __name__ == "__main__":
         "MAE0":np.mean(np.array(mae0)),
         "MAE-sep0.1":np.mean(np.array(maes_sep))
     }
+
+    if args.isPositionVariant:
+        labMAEs = calcLabeledError(errors,labels,opt="MA")
+        labMSEs = calcLabeledError(errors,labels,opt="MS")
+        summary_data["labMAEs"] = labMAEs
+        summary_data["labMSEs"] = labMSEs
+        summary_data["labels"] = labels
 
     print("MSE={0:.10f}, MAE={1:.10f}".format(summary_data["MSE"],summary_data["MAE"]))
     
