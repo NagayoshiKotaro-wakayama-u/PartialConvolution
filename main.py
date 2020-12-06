@@ -161,6 +161,8 @@ if __name__ == '__main__':
     VALID_MASK = dspath+"valid_mask" if args.validmask=="" else args.validmask
     TEST_DIR = dspath+"test"+os.sep if args.test=="" else args.test
     TEST_MASK = dspath+"test_mask" if args.testmask=="" else args.testmask
+    # SEA_PATH = ".{0}data{0}sea.png".format(os.sep)
+    SEA_PATH = ""
     train_Num = sum([1 if '.png' in p else 0 for p in glob.glob(TRAIN_DIR+"**",recursive=True)]) # 画像の枚数をカウント
     valid_Num = sum([1 if '.png' in p else 0 for p in glob.glob(VALID_DIR+"**",recursive=True)])
     test_Num = sum([1 if '.png' in p else 0 for p in glob.glob(TEST_DIR+"**",recursive=True)])
@@ -248,7 +250,7 @@ if __name__ == '__main__':
     history = LossHistory(loss_path)
     
     # Build the model
-    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL=True)
+    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= args.KLoff,exist_point_file=SEA_PATH,exist_flag=True)
     
     # Loading of checkpoint（デフォルトではロードせずに初めから学習する）
     if args.checkpoint:
