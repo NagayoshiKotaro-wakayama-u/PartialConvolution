@@ -75,14 +75,14 @@ def clip(x,sta=-0.1,end=0.1): # Clip the value
     return res
 
 def calcLabeledError(errors,labels,opt="MA"):
-    pdb.set_trace()
+    # pdb.set_trace()
     labs = np.array(list(set(labels)))
     results = [[] for _ in range(labs.shape[0])] # labelの種類だけリストを作成
 
     for lab,error in zip(labels,errors):
-        ind = np.arange(labs.shape[0])[labs==lab]
+        ind = np.arange(labs.shape[0])[labs==lab][0]
         results[ind].append(np.abs(error)) # ラベル別で誤差を保存
-    pdb.set_trace()
+    # pdb.set_trace()
 
     if opt=="MA": # MAE
         results = [np.mean(res) for res in results]

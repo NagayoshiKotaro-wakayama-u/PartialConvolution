@@ -193,10 +193,10 @@ if __name__ == "__main__":
 
         #================================================
         # 予測結果を出力
-        #"""
+        """
         tmp = (pred*255).astype("uint8")
         cv2.imwrite(os.path.join(result_path,name), tmp)
-        #"""
+        """
         #================================================
 
         #================================================
@@ -221,7 +221,7 @@ if __name__ == "__main__":
         xs = [x1,cmap(pred),cmap(img)]
         titles = ["masked","pred(MAE={0:.4f})".format(mae_grand),"original"]
 
-        #"""
+        """
         _, axes = plt.subplots(3, width, figsize=(width*4+2, 15))
         for i,x in enumerate(xs):
             axes[0,i].imshow(x,vmin=0,vmax=255)
@@ -254,10 +254,10 @@ if __name__ == "__main__":
         
         plt.savefig(os.path.join(compare_path,name))
         plt.close()
-        #"""
+        """
         #==========================================================================================
         # calculate pcv and plot
-        #"""
+        """
         _, axes = plt.subplots(2, width, figsize=(width*4+2, 11))
 
         # 主成分分析
@@ -295,7 +295,7 @@ if __name__ == "__main__":
 
         plt.savefig(os.path.join(pcv_path,name))
         plt.close()
-        #"""
+        """
         #==========================================================================================
 
     #"""
@@ -317,6 +317,8 @@ if __name__ == "__main__":
         "MAE-sep0.1":np.mean(np.array(maes_sep))
     }
 
+    print("MSE={0:.10f}, MAE={1:.10f}".format(summary_data["MSE"],summary_data["MAE"]))
+
     if args.isPositionVariant:
         labMAEs = calcLabeledError(errors,labels,opt="MA")
         labMSEs = calcLabeledError(errors,labels,opt="MS")
@@ -324,8 +326,6 @@ if __name__ == "__main__":
         summary_data["labMSEs"] = labMSEs
         summary_data["labels"] = labels
 
-    print("MSE={0:.10f}, MAE={1:.10f}".format(summary_data["MSE"],summary_data["MAE"]))
-    
     pkl_path = os.path.join(path,"analysed_data.pickle")
     with open(pkl_path,"wb") as f:
         pickle.dump(summary_data,f)
