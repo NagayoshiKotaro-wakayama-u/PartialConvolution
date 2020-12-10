@@ -7,6 +7,7 @@ import random
 import pdb
 from argparse import ArgumentParser
 from PIL import Image
+import pickle
 
 #二次元正規分布の確率密度を返す関数
 def gaussian(x,sigma,mu):
@@ -36,6 +37,17 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+
+    shape = (512,512) # 画像のサイズ
+    keys = ["train","valid","test"]
+    dsPath = "data" + os.sep + args.dataSetPath # データセットのパス
+    if not os.path.isdir(dsPath):
+        os.makedirs(dsPath)
+
+    dataNum = {keys[0]:args.train,keys[1]:args.valid,keys[2]:args.test} # train,validation,testでの生成数 
+    imagePath = [dsPath + os.sep + k + ".pickle" for k in keys]
+
+    # 指定されたマスク画像およびマスク画像のpickleデータをロードする
     if args.loadMaskPath!="":
         ext = args.loadMaskPath.split(".")[-1]
         if ext == "png" or ext == "jpg":
@@ -43,39 +55,27 @@ if __name__ == "__main__":
         elif ext == "pickle" or ext == "pkl":
             existMask = pickle.load(open(args.loadMaskPath,"rb"))
 
+        # サイズが合わなければreshape
+        if existMask.shape[0] == shape[0] and existMask.shape[1] == shape[1]:
+            print("Given mask image is reshaped.")
+            existMask = np.reshape(existMask,shape)
+
+
     # 混合分布と位置依存は同時に使えない
     if args.isMixedGaussian and args.positionVariant:
         print("you can't use option -mixed and -posVariant at the same time")
         sys.exit()
-
-    dsPath = "data" + os.sep + args.dataSetPath # データセットのパス
-
-    shape = (512,512) # 画像のサイズ
-    keys = ["train","valid","test"]
-    dataNum = {keys[0]:args.train,keys[1]:args.valid,keys[2]:args.test} # train,validation,testでの生成数
-    dataPath = [dsPath+os.sep+k+os.sep+k+"_img" for k in keys]
-
-    for DIR in dataPath:
-        if not os.path.isdir(DIR):
-            os.makedirs(DIR)     
 
     if args.isMixedGaussian:
         pointNum = [2,3] # ガウス分布の数 ([2,3]なら2~3個のガウス分布による混合ガウスになる)
     else:
         pointNum = [1,1]
 
-    # imagePath = [dsPath + os.sep + k + ".pickle" for k in keys]
-
     #================================================================================================
     # マスク画像の作成
-    maskPath = [dsPath+os.sep+k+"_mask" for k in keys]
-    # maskPath = [dsPath + os.sep+k+"_mask.pickle" for k in keys]
+    maskPath = [dsPath + os.sep+k+"_mask.pickle" for k in keys]
     maskRatio = args.maskratio # マスク部分の割合
     masktype = args.masktype
-
-    for DIR in maskPath: # マスクのディレクトリを作成
-        if not os.path.isdir(DIR):
-            os.makedirs(DIR)
 
     def random_point_nodup(num): # 重複なしで座標を生成
         res = []
@@ -93,37 +93,33 @@ if __name__ == "__main__":
         return res
  
     obsNum = int(shape[0]*shape[1]*(1-maskRatio))
-    if args.loadMaskPath == "":
+    if args.loadMaskPath == "": # 指定されたマスクがない場合
         if masktype == "same":
             mask = np.zeros(shape)
             # 観測点を生成し,マスクの要素を1 (画像として保存するので255) にする
             obs = random_point_nodup(obsNum)
             for p in obs:
-                mask[p[0],p[1]] = 255
+                mask[p[0],p[1]] = 1
             mask = mask.astype("uint8")
 
     for path,key in zip(maskPath,keys):
-        # masks = []
+        masks = []
         print("generate "+key+"_mask data")
         for i in range(dataNum[key]):
             print("\r progress:{0}/{1}".format(i+1,dataNum[key]),end="")
             if masktype=="same":
-                if args.loadMaskPath !="":
-                    pass
-                    # masks.append(existMask)
+                if args.loadMaskPath !="": # 指定されたマスクがある場合
+                    masks.append(existMask)
                 else:
-                    pass
-                    # masks.append(mask)    
-                cv2.imwrite(path+os.sep+"{0:04}.png".format(i),mask)
+                    masks.append(mask)
             else:
                 mask = np.zeros(shape)
                 obs = random_point_nodup(obsNum)
                 for p in obs:
-                    mask[p[0],p[1]] = 255
-                # masks.append(mask)
-                mask = mask.astype("uint8")
-                cv2.imwrite(path+os.sep+"{0:04}.png".format(i),mask)
-        # pickle.dump(np.array(masks),open(path,"wb"))
+                    mask[p[0],p[1]] = 1
+                masks.append(mask.astype("uint8"))
+
+        pickle.dump(np.array(masks),open(path,"wb"))
         print("")
 
     #=============================================================
@@ -173,27 +169,29 @@ if __name__ == "__main__":
         return mu,sigma,label
 
     # データの生成
-    for path,key in zip(dataPath,keys):
-    # for path,key in zip(imagePath,keys):
+    for path,key in zip(imagePath,keys):
         imgs = []
+        labels = []
         print("generate "+key+" data")
         for i in range(dataNum[key]):
             print("\r progress:{0}/{1}".format(i+1,dataNum[key]),end="")
             Z = np.zeros(shape)
 
-            labels = ""
+            labs = ""
             for _ in range(random.randint(pointNum[0],pointNum[1])):
                 # ランダムにサンプリング
                 rand_mu, rand_sigma,label = sample_mu_sigma()
                 # 生成
                 Z += gaussian(XY,rand_sigma,rand_mu).reshape(shape)
-                labels += str(label)
+                labs += str(label)
+
+            labels.append(labs)
 
             weight = random.random()*128+127
             img = (Z/np.max(Z))*weight
-            cv2.imwrite(path+os.sep+"{0:04}_lab{1}.png".format(i,labels),img.astype("uint8"))
-            # imgs.append(Z/max(Z))
-        # pickle.dump(np.array(imgs),open(path,"wb"))
+            imgs.append(img)
+        dumpData = {"images":np.array(imgs),"labels":labels}
+        pickle.dump(dumpData,open(path,"wb"))
         print("")
 
 
