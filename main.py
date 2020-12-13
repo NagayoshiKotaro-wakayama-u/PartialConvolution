@@ -79,10 +79,9 @@ class AugmentingDataGenerator(ImageDataGenerator):
         generator = super().flow_from_directory(directory, class_mode=None, color_mode='grayscale', *args, **kwargs) 
         seed = None if 'seed' not in kwargs else kwargs['seed']
         while True:
-            
             # Get augmentend image samples
             ori = next(generator)
-
+            
             # Get masks for each image sample            
             mask = np.stack([
                 mask_generator.sample(seed)
@@ -92,9 +91,20 @@ class AugmentingDataGenerator(ImageDataGenerator):
             # Apply masks to all image sample
             masked = deepcopy(ori)
             masked[mask==0] = 0
-
             gc.collect()
             yield [masked, mask], ori
+
+def Generator(imagePath, maskPath, batchSize):
+    data = pickle.load(open(imagePath,"rb"))
+    mask = pickle.load(open(maskPath,"rb"))
+
+    while True:
+        for B in range(0, len(data), batchSize):
+            ori = data["images"][B:B+batchSize] # original images
+            # Y = data["labels"][B:B+batchSize] # labels
+            mask = mask[B:B+batchSize] # masks
+            masked = mask*ori # masked image
+            yield [masked, mask], ori # Returning mask
 
 # 損失の監視・保存に用いるクラス
 class LossHistory(Callback):
@@ -155,59 +165,46 @@ if __name__ == '__main__':
     dataset = args.dataset # データセットのディレクトリ
     dspath = ".{0}data{0}{1}{0}".format(os.sep,dataset)
     
-    TRAIN_DIR = dspath+"train"+os.sep if args.train=="" else args.train
-    TRAIN_MASK = dspath+"train_mask" if args.trainmask=="" else args.trainmask
-    VALID_DIR = dspath+"valid"+os.sep if args.validation=="" else args.valid
-    VALID_MASK = dspath+"valid_mask" if args.validmask=="" else args.validmask
-    TEST_DIR = dspath+"test"+os.sep if args.test=="" else args.test
-    TEST_MASK = dspath+"test_mask" if args.testmask=="" else args.testmask
+    # TRAIN_DIR = dspath+"train"+os.sep if args.train=="" else args.train
+    # TRAIN_MASK = dspath+"train_mask" if args.trainmask=="" else args.trainmask
+    # VALID_DIR = dspath+"valid"+os.sep if args.validation=="" else args.valid
+    # VALID_MASK = dspath+"valid_mask" if args.validmask=="" else args.validmask
+    # TEST_DIR = dspath+"test"+os.sep if args.test=="" else args.test
+    # TEST_MASK = dspath+"test_mask" if args.testmask=="" else args.testmask
+
+    TRAIN_PICKLE = dspath+"train.pickle" if args.train=="" else args.train
+    TRAIN_MASK_PICKLE = dspath+"train_mask.pickle" if args.trainmask=="" else args.trainmask
+    VALID_PICKLE = dspath+"valid.pickle" if args.validation=="" else args.valid
+    VALID_MASK_PICKLE = dspath+"valid_mask.pickle" if args.validmask=="" else args.validmask
+    TEST_PICKLE = dspath+"test.pickle" if args.test=="" else args.test
+    TEST_MASK_PICKLE = dspath+"test_mask.pickle" if args.testmask=="" else args.testmask
+
     # SEA_PATH = ".{0}data{0}sea.png".format(os.sep)
     SEA_PATH = ""
-    train_Num = sum([1 if '.png' in p else 0 for p in glob.glob(TRAIN_DIR+"**",recursive=True)]) # 画像の枚数をカウント
-    valid_Num = sum([1 if '.png' in p else 0 for p in glob.glob(VALID_DIR+"**",recursive=True)])
-    test_Num = sum([1 if '.png' in p else 0 for p in glob.glob(TEST_DIR+"**",recursive=True)])
+    train_Num = pickle.load(open(TRAIN_PICKLE,"rb"))["images"].shape[0] # 画像の枚数をカウント
+    valid_Num = pickle.load(open(VALID_PICKLE,"rb"))["images"].shape[0]
+    # test_Num = sum([1 if '.png' in p else 0 for p in glob.glob(TEST_DIR+"**",recursive=True)])
     img_w = 512
     img_h = 512
     shape = (img_h, img_w)
 
     # バッチサイズはメモリサイズに合わせて調整が必要
     batchsize = 5 # バッチサイズ
-    steps_per_epoch = train_Num//batchsize # 1エポック内のiterationの数
+    steps_per_epoch = train_Num//batchsize # 1エポック内のiteration数
 
     # Create training generator
-    train_datagen = AugmentingDataGenerator(rescale=1./255)
-    train_mask_gen = MaskGenerator(img_h,img_w,channels=1,rand_seed=42,filepath=TRAIN_MASK)
-    train_generator = train_datagen.flow_from_directory(
-        TRAIN_DIR,
-        train_mask_gen,
-        target_size=shape, 
-        batch_size=batchsize
-    )
+    train_generator = Generator(TRAIN_PICKLE,TRAIN_MASK_PICKLE,batchsize)
 
     # Create validation generator
-    val_datagen = AugmentingDataGenerator(rescale=1./255)
-    valid_mask_gen = MaskGenerator(img_h,img_w,channels=1,rand_seed=42,filepath=VALID_MASK)
-    val_generator = val_datagen.flow_from_directory(
-        VALID_DIR,
-        valid_mask_gen, 
-        target_size=shape, 
-        batch_size=1
-    )
+    val_generator = Generator(VALID_PICKLE,VALID_MASK_PICKLE,batchsize)
 
     # Create testing generator
-    test_datagen = AugmentingDataGenerator(rescale=1./255)
-    test_mask_gen = MaskGenerator(img_h,img_w,channels=1,rand_seed=42,filepath=TEST_MASK)
-    test_generator = test_datagen.flow_from_directory(
-        TEST_DIR,
-        test_mask_gen,
-        target_size=shape, 
-        batch_size=1
-    )
+    test_generator = Generator(TEST_PICKLE,TEST_MASK_PICKLE,batchsize)
 
     # Pick out an example to be send to test samples folder
     test_data = next(test_generator)
     (masked, mask), ori = test_data
-    mask_rgb = np.tile(np.reshape(mask,[shape[0],shape[1],1]),(1,1,3)) #カラーで可視化する際に用いるマスク
+    mask_rgb = np.tile(np.reshape(mask[0],[shape[0],shape[1],1]),(1,1,3)) #カラーで可視化する際に用いるマスク
 
     # 学習途中のテスト結果が必要ない場合はmodel.fit_generator内で
     # 以下の plot_callback() を呼び出している行のコメントアウトをして下さい
@@ -220,7 +217,7 @@ if __name__ == '__main__':
         pred_time = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
 
         # Clear current output and display test images
-        for i in range(len(ori)):
+        for i in range(ori.shape[0]):
             img = ori[i,:,:,0]
             pred = pred_img[i,:,:,0]
 
@@ -250,7 +247,7 @@ if __name__ == '__main__':
     history = LossHistory(loss_path)
     
     # Build the model
-    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= args.KLoff,exist_point_file=SEA_PATH,exist_flag=True)
+    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= True,exist_point_file=SEA_PATH,exist_flag=True)
     
     # Loading of checkpoint（デフォルトではロードせずに初めから学習する）
     if args.checkpoint:
@@ -279,7 +276,7 @@ if __name__ == '__main__':
                 save_weights_only=True,
                 period = 10
             ),
-            LambdaCallback(on_epoch_end=lambda epoch, logs: plot_callback(model, test_path)),
+            LambdaCallback(on_epoch_end=lambda epoch, logs: plot_callback(model, test_path)), # 学習中のテスト出力が不必要なら消す
             history,
             TQDMCallback()
         ]

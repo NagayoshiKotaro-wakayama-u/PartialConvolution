@@ -38,7 +38,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    shape = (512,512) # 画像のサイズ
+    shape = (512,512,1) # 画像のサイズ
     keys = ["train","valid","test"]
     dsPath = "data" + os.sep + args.dataSetPath # データセットのパス
     if not os.path.isdir(dsPath):
@@ -53,12 +53,11 @@ if __name__ == "__main__":
         if ext == "png" or ext == "jpg":
             existMask = np.array(Image.open(args.loadMaskPath))/255
         elif ext == "pickle" or ext == "pkl":
-            existMask = pickle.load(open(args.loadMaskPath,"rb"))
+            existMask = pickle.load(open(args.loadMaskPath,"rb"))[0]
 
-        # サイズが合わなければreshape
-        if existMask.shape[0] == shape[0] and existMask.shape[1] == shape[1]:
-            print("Given mask image is reshaped.")
-            existMask = np.reshape(existMask,shape)
+        # reshape
+        print("Given mask image is reshaped.")
+        existMask = np.reshape(existMask,shape)
 
 
     # 混合分布と位置依存は同時に使えない
@@ -131,10 +130,11 @@ if __name__ == "__main__":
     XY = np.c_[X.ravel(),Y.ravel()]
 
     def sample_mu_sigma(): # 平均と分散のランダムサンプリング
-        mu = np.random.rand(2)*np.array(shape)
+        range_shape = np.array([shape[0],shape[1]])
+        mu = np.random.rand(2)*range_shape
 
         if args.positionVariant:
-            centered_mu = mu-np.array(shape)/2
+            centered_mu = mu-range_shape/2
             if centered_mu[0]>0 and centered_mu[1]>0:
                 xy = 0
                 xx = 6000
@@ -187,11 +187,10 @@ if __name__ == "__main__":
 
             labels.append(labs)
 
-            weight = random.random()*128+127
-            img = (Z/np.max(Z))*weight
+            weight = random.random()*128 + 127 # max:127 ~ 255
+            img = (Z/np.max(Z)) * weight / 255 # max:0.5 ~ 1
             imgs.append(img)
         dumpData = {"images":np.array(imgs),"labels":labels}
         pickle.dump(dumpData,open(path,"wb"))
         print("")
-
 
