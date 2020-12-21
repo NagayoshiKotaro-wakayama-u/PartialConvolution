@@ -24,9 +24,11 @@ from PIL import Image
 
 from libs.pconv_model import PConvUnet
 from libs.util import MaskGenerator,ImageChunker,rangeError,nonhole,cmap,calcPCV1,clip,calcLabeledError
+from libs.createSpatialHistogram import compSpatialHist, compKL
 
 import pickle
 import cv2
+import tensorflow as tf
 
 
 def analyse(x):#x = [n,d]
@@ -51,7 +53,7 @@ def parse_args():
 if __name__ == "__main__":
 
     args = parse_args()
-    dspath = args.dataset
+    dspath = "data" + os.sep + args.dataset+os.sep
     pcv_thre = args.pcv_thre
     test_imgs_path = ".{0}data{0}{1}{0}test{0}test_img{0}*.png".format(os.sep,dspath) if args.test=="" else args.test
 
@@ -61,34 +63,31 @@ if __name__ == "__main__":
         os.makedirs(path)
 
     shape = (512,512)
-    img_files = sorted(glob.glob(test_imgs_path)) # テスト画像のパス取得
-    mask_files = sorted(glob.glob(".{0}data{0}{1}{0}test_mask{0}*.png".format(os.sep,dspath))) # テストのマスク画像のパス取得
-    exist = np.ones(shape) # 観測部分が１となる画像(マスク画像とは別の未観測地点がある場合に使用(Toyデータでは使用しないため全て１))
+    TEST_PICKLE = dspath+"test.pickle"
+    TEST_MASK_PICKLE = dspath+"test_mask.pickle"
+    exist = np.array(Image.open("data/sea.png"))/255
+    # exist = np.ones(shape) # 観測部分が１となる画像(マスク画像とは別の未観測地点がある場合に使用(Toyデータでは使用しないため全て１))
     exist_rgb = np.tile(exist[:,:,np.newaxis],(1,1,3)) # カラー画像による可視化時に用いる
     BATCH_SIZE = 4
 
-    names, imgs, masks, labels = [], [], [], []
-
-    for i,fname in enumerate(img_files):
-        # normalyse
-        img = np.array(Image.open(fname))/255
-        mask = np.array(Image.open(mask_files[i]))/255
-
-        names.append(fname.split(os.sep)[-1])
-        imgs.append(img[:,:,np.newaxis])
-        masks.append(mask[:,:,np.newaxis])
+    # names, imgs, masks, labels = [], [], [], []
+    tmp = pickle.load(open(TEST_PICKLE,"rb"))
+    imgs = tmp["images"]
+    names = [nm.split(os.sep)[-1] for nm in tmp["labels"]]
+    masks = pickle.load(open(TEST_MASK_PICKLE,"rb"))
 
     # モデルをビルドし,学習した重みをロード
-    model = PConvUnet(img_rows=img.shape[0],img_cols=img.shape[1],inference_only=True)
+    model = PConvUnet(img_rows=imgs.shape[1],img_cols=imgs.shape[2],inference_only=True)
     model_name = args.model
-    model.load(r"{}logs/{}_model/{}".format(path,dspath,model_name), train_bn=False)
+    model.load(r"{}logs/{}_model/{}".format(path,args.dataset,model_name), train_bn=False)
     chunker = ImageChunker(512, 512, 30)
 
     # テスト結果の出力先ディレクトリを作成
     result_path = path+"result"+os.sep+"test"
     compare_path = path+"result"+os.sep+"comparison"
     pcv_path = path + "result"+os.sep+"pcv_thre{}_comparison".format(pcv_thre)
-    for DIR in [result_path,compare_path,pcv_path]:
+    hist_path = path + "result" + os.sep + "spatialHist_thre{}".format(pcv_thre)
+    for DIR in [result_path,compare_path,pcv_path,hist_path]:
         if not os.path.isdir(DIR):
             os.makedirs(DIR)
     
@@ -96,6 +95,14 @@ if __name__ == "__main__":
     centers, lines = [], [] # XY座標による主成分分析時の平均・主成分ベクトル
     mae0, maes_sep = [],[] # 値域ごとのMAE
     cm_bwr = plt.get_cmap("bwr") # 青から赤へのカラーマップ
+
+
+    exist_ = exist.astype("float32")[np.newaxis,:,:,np.newaxis]
+    img_sph = compSpatialHist(imgs.astype("float32"),exist_) # original histogram
+    masked_sph = compSpatialHist((imgs*masks).astype("float32"),exist_) # masked histogram
+    
+    sess = tf.Session()
+    masked_p,img_p,kls = sess.run([masked_sph,img_sph,compKL(masked_sph,img_sph)])
 
     # 予測してプロット
     for name,img,mask,ite in zip(names,imgs,masks,[i for i in range(len(names))]):
@@ -116,10 +123,10 @@ if __name__ == "__main__":
 
         #================================================
         # 予測結果を出力
-        """
+        #"""
         tmp = (pred*255).astype("uint8")
         cv2.imwrite(os.path.join(result_path,name), tmp)
-        """
+        #"""
         #================================================
 
         #================================================
@@ -144,9 +151,10 @@ if __name__ == "__main__":
         xs = [x1,cmap(pred),cmap(img)]
         titles = ["masked","pred(MAE={0:.4f})".format(mae_grand),"original"]
 
-        """
+        #"""
         _, axes = plt.subplots(3, width, figsize=(width*4+2, 15))
         for i,x in enumerate(xs):
+            x[exist_rgb==0] = 255
             axes[0,i].imshow(x,vmin=0,vmax=255)
             axes[0,i].set_title(titles[i])
 
@@ -177,10 +185,10 @@ if __name__ == "__main__":
         
         plt.savefig(os.path.join(compare_path,name))
         plt.close()
-        """
+        #"""
         #==========================================================================================
         # calculate pcv and plot
-        """
+        #"""
         _, axes = plt.subplots(2, width, figsize=(width*4+2, 11))
 
         # 主成分分析
@@ -218,7 +226,48 @@ if __name__ == "__main__":
 
         plt.savefig(os.path.join(pcv_path,name))
         plt.close()
-        """
+        #"""
+        #==========================================================================================
+        # Spatial Histogram
+        # pdb.set_trace()
+        pred_sph = compSpatialHist(pred.astype("float32")[np.newaxis,:,:,np.newaxis],exist_) # prediction histogram
+        pred_p,klp = sess.run([pred_sph,compKL(pred_sph,img_sph[ite:ite+1])])
+
+        fig = plt.figure()
+        # masked
+        ax=fig.add_subplot(2,3,1)
+        im = ax.imshow(masked,vmin=0,vmax=1,cmap="jet")
+        ax.set_title('sparse')
+
+        ax=fig.add_subplot(2,3,4)
+        im = ax.imshow(masked_p[ite],cmap="jet")
+        fig.colorbar(im, fraction=0.046, pad=0.04)
+        ax.set_title(f'hist of sparse, kl={kls[ite]:.4f}')
+
+        # prediction
+        ax=fig.add_subplot(2,3,2)
+        im = ax.imshow(pred,vmin=0,vmax=1,cmap="jet")
+        ax.set_title('pred')
+
+        ax=fig.add_subplot(2,3,5)
+        im = ax.imshow(pred_p[0],cmap="jet")
+        fig.colorbar(im, fraction=0.046, pad=0.04)
+        ax.set_title(f'hist of pred, kl={klp[0]:.4f}')
+
+        # original
+        ax=fig.add_subplot(2,3,3)
+        ax.imshow(img,vmin=0,vmax=1,cmap="jet")
+        fig.colorbar(im, fraction=0.046, pad=0.04)
+        ax.set_title('dense')
+
+        ax=fig.add_subplot(2,3,6)
+        im = ax.imshow(img_p[ite],cmap="jet")
+        fig.colorbar(im, fraction=0.046, pad=0.04)
+        ax.set_title(f'hist of original')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(hist_path,name))
+        plt.close()
         #==========================================================================================
 
     #"""

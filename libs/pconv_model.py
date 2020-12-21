@@ -13,6 +13,7 @@ from keras import backend as K
 from keras.utils.multi_gpu_utils import multi_gpu_model
 
 from libs.pconv_layer import PConv2D
+from libs.createSpatialHistogram import compSpatialHist,compKL
 from PIL import Image
 
 def calcDet(lis,dim):
@@ -30,7 +31,7 @@ def calcDet(lis,dim):
 
 class PConvUnet(object):
 
-    def __init__(self, img_rows=512, img_cols=512, inference_only=False, net_name='default', gpus=1, KLthre=0.1, isUsedKL=True, exist_point_file="",exist_flag=False):
+    def __init__(self, img_rows=512, img_cols=512, inference_only=False, net_name='default', gpus=1, KLthre=0.1, isUsedKL=True,isUsedHistKL=True, exist_point_file="",exist_flag=False):
         """Create the PConvUnet. If variable image size, set img_rows and img_cols to None
 
         Args:
@@ -53,6 +54,7 @@ class PConvUnet(object):
         self.losses = None
         self.KLthre = KLthre
         self.isUsedKL = isUsedKL
+        self.isUsedHistKL = isUsedHistKL
         self.existFlag = exist_flag
 
         # X座標,Y座標の行列
@@ -132,7 +134,7 @@ class PConvUnet(object):
         model.compile(
             optimizer = Adam(lr=lr),
             loss=self.loss_total(inputs_mask),
-            metrics=[self.PSNR,self.loss_KL]
+            metrics=[self.PSNR,self.loss_KL,self.loss_spatialHistKL]
         )
 
     def loss_total(self, mask):
@@ -150,16 +152,22 @@ class PConvUnet(object):
             l2 = self.loss_hole(mask, y_true, y_pred)
             l3 = self.loss_tv(mask, y_comp)
             l4 = self.loss_KL(y_true, y_pred)
+            l5 = self.loss_spatialHistKL(y_true,y_pred)
 
-            # Return loss function
+            rslt = l1 + 6*l2 + 0.1*l3
+            
             if self.isUsedKL:
-                return l1 + 6*l2 + 0.1*l3 + l4
-            else:
-                return l1 + 6*l2 + 0.1*l3
+                rslt = rslt + l4
+            
+            if self.isUsedHistKL:
+                rslt = rslt + l5
+            
+            # Return loss function
+            return rslt
 
         return loss
 
-    
+    # assume gaussian
     def loss_KL(self,y_true, y_pred,dim=2):
         thre = self.KLthre
         # y_predの中でthre以上の値の座標を取り出すためのマスクを作成
@@ -214,6 +222,11 @@ class PConvUnet(object):
         KL = 0.5*(tf.log(det2/(det1+1e-10)) + tr21 + sq -dim)
 
         return KL
+
+    def loss_spatialHistKL(self,y_true,y_pred):
+        p_true = compSpatialHist(y_true,self.exist,thre=self.KLthre)
+        p_pred = compSpatialHist(y_pred,self.exist,thre=self.KLthre)
+        return compKL(p_true,p_pred)
 
 
     def loss_hole(self, mask, y_true, y_pred):

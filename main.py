@@ -67,7 +67,8 @@ def parse_args():
     parser.add_argument( '-testmask', '--testmask', type=str, default="", help='Folder with testing mask images')
     parser.add_argument('-checkpoint', '--checkpoint',type=str, help='Previous weights to be loaded onto model')
     parser.add_argument('-KLthre', '--KLthre',type=float, default=0.4,help='threshold value of KLloss')
-    parser.add_argument('-KLoff','--KLoff',action='store_false',help="Flag for not using KL-loss function")
+    parser.add_argument('-KL','--KL',action='store_true',help="Flag for using KL-loss function")
+    parser.add_argument('-histKL','--histKL',action='store_true',help="Flag for using spatial Histogram KL-loss function")
     parser.add_argument('-epochs','--epochs',type=int,default=100,help='training epoch')
         
     return  parser.parse_args()
@@ -112,28 +113,31 @@ class LossHistory(Callback):
         if not os.path.isdir(savepath):
             os.makedirs(savepath)
         self.path = os.path.join(savepath,"training_losses.pickle")
+        self.histKL = []
         self.KL = []
         self.PSNR = []
         self.totalLoss = []
 
     def on_batch_end(self, batch, logs={}): # バッチ終了時に呼び出される
+        self.histKL.append(logs.get("loss_spatialHistKL"))
         self.KL.append(logs.get("loss_KL"))
         self.PSNR.append(logs.get("PSNR"))
         self.totalLoss.append(logs.get("loss"))
 
     def on_train_end(self, logs={}): # 学習終了時に全損失をpickleとして保存
+        types = ["Total","PSNR","KL","spaHistKL"]
         summary = {
             "epochs":epochs,
             "steps_per_epoch":steps_per_epoch,
-            "KL":np.array(self.KL),
-            "PSNR":np.array(self.PSNR),
-            "Total":np.array(self.totalLoss)
+            types[0]:np.array(self.totalLoss),
+            types[1]:np.array(self.PSNR),
+            types[2]:np.array(self.KL),
+            types[3]:np.array(self.histKL)
         }
 
         with open(self.path,"wb") as f:
             pickle.dump(summary,f)
-
-        types = ["Total","PSNR","KL"]
+        
         for lossName in types:
             loss = summary[lossName]
             plt.plot(range(epochs*steps_per_epoch),loss)
@@ -142,7 +146,6 @@ class LossHistory(Callback):
             plt.title(args.experiment)
             plt.savefig(os.path.join(loss_path,lossName+".png"))
             plt.close()
-
 
 # Run script
 if __name__ == '__main__':
@@ -164,13 +167,6 @@ if __name__ == '__main__':
 
     dataset = args.dataset # データセットのディレクトリ
     dspath = ".{0}data{0}{1}{0}".format(os.sep,dataset)
-    
-    # TRAIN_DIR = dspath+"train"+os.sep if args.train=="" else args.train
-    # TRAIN_MASK = dspath+"train_mask" if args.trainmask=="" else args.trainmask
-    # VALID_DIR = dspath+"valid"+os.sep if args.validation=="" else args.valid
-    # VALID_MASK = dspath+"valid_mask" if args.validmask=="" else args.validmask
-    # TEST_DIR = dspath+"test"+os.sep if args.test=="" else args.test
-    # TEST_MASK = dspath+"test_mask" if args.testmask=="" else args.testmask
 
     TRAIN_PICKLE = dspath+"train.pickle" if args.train=="" else args.train
     TRAIN_MASK_PICKLE = dspath+"train_mask.pickle" if args.trainmask=="" else args.trainmask
@@ -183,7 +179,6 @@ if __name__ == '__main__':
     SEA_PATH = ""
     train_Num = pickle.load(open(TRAIN_PICKLE,"rb"))["images"].shape[0] # 画像の枚数をカウント
     valid_Num = pickle.load(open(VALID_PICKLE,"rb"))["images"].shape[0]
-    # test_Num = sum([1 if '.png' in p else 0 for p in glob.glob(TEST_DIR+"**",recursive=True)])
     img_w = 512
     img_h = 512
     shape = (img_h, img_w)
@@ -192,14 +187,9 @@ if __name__ == '__main__':
     batchsize = 5 # バッチサイズ
     steps_per_epoch = train_Num//batchsize # 1エポック内のiteration数
 
-    # Create training generator
-    train_generator = Generator(TRAIN_PICKLE,TRAIN_MASK_PICKLE,batchsize)
-
-    # Create validation generator
-    val_generator = Generator(VALID_PICKLE,VALID_MASK_PICKLE,batchsize)
-
-    # Create testing generator
-    test_generator = Generator(TEST_PICKLE,TEST_MASK_PICKLE,batchsize)
+    train_generator = Generator(TRAIN_PICKLE,TRAIN_MASK_PICKLE,batchsize) # Create training generator
+    val_generator = Generator(VALID_PICKLE,VALID_MASK_PICKLE,batchsize) # Create validation generator
+    test_generator = Generator(TEST_PICKLE,TEST_MASK_PICKLE,batchsize) # Create testing generator
 
     # Pick out an example to be send to test samples folder
     test_data = next(test_generator)
@@ -247,7 +237,7 @@ if __name__ == '__main__':
     history = LossHistory(loss_path)
     
     # Build the model
-    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= True,exist_point_file=SEA_PATH,exist_flag=True)
+    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= args.KL,isUsedHistKL=args.histKL,exist_point_file=SEA_PATH,exist_flag=True)
     
     # Loading of checkpoint（デフォルトではロードせずに初めから学習する）
     if args.checkpoint:
@@ -276,7 +266,7 @@ if __name__ == '__main__':
                 save_weights_only=True,
                 period = 10
             ),
-            LambdaCallback(on_epoch_end=lambda epoch, logs: plot_callback(model, test_path)), # 学習中のテスト出力が不必要なら消す
+            LambdaCallback(on_epoch_end=lambda epoch, logs: plot_callback(model, test_path)), # 学習中のテスト出力が不必要ならこの行をコメントアウト
             history,
             TQDMCallback()
         ]

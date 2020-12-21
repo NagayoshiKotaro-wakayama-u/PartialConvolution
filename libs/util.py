@@ -93,6 +93,9 @@ def calcLabeledError(errors,labels,opt="MA"):
 
     return results,labs
 
+def PSNR(y_pred,y_true):
+    return - 10.0 * np.log(np.mean(np.square(y_pred - y_true))) / np.log(10.0)
+
 class MaskGenerator():
 
     def __init__(self, height, width, channels=3, rand_seed=None, filepath=None):
