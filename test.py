@@ -65,15 +65,17 @@ if __name__ == "__main__":
     shape = (512,512)
     TEST_PICKLE = dspath+"test.pickle"
     TEST_MASK_PICKLE = dspath+"test_mask.pickle"
-    exist = np.array(Image.open("data/sea.png"))/255
-    # exist = np.ones(shape) # 観測部分が１となる画像(マスク画像とは別の未観測地点がある場合に使用(Toyデータでは使用しないため全て１))
+    # exist = np.array(Image.open("data/sea.png"))/255
+    exist = np.ones(shape) # 観測部分が１となる画像(マスク画像とは別の未観測地点がある場合に使用(Toyデータでは使用しないため全て１))
     exist_rgb = np.tile(exist[:,:,np.newaxis],(1,1,3)) # カラー画像による可視化時に用いる
     BATCH_SIZE = 4
 
+    pdb.set_trace()
     # names, imgs, masks, labels = [], [], [], []
     tmp = pickle.load(open(TEST_PICKLE,"rb"))
     imgs = tmp["images"]
-    names = [nm.split(os.sep)[-1] for nm in tmp["labels"]]
+    # names = [nm.split(os.sep)[-1] for nm in tmp["labels"]]
+    names = ["{0:04d}.png".format(i) for i in range(imgs.shape[0])]
     masks = pickle.load(open(TEST_MASK_PICKLE,"rb"))
 
     # モデルをビルドし,学習した重みをロード
@@ -82,7 +84,7 @@ if __name__ == "__main__":
     model.load(r"{}logs/{}_model/{}".format(path,args.dataset,model_name), train_bn=False)
     chunker = ImageChunker(512, 512, 30)
 
-    # テスト結果の出力先ディレクトリを作成
+    # テスト結果の出力先ディレクトリを作成    
     result_path = path+"result"+os.sep+"test"
     compare_path = path+"result"+os.sep+"comparison"
     pcv_path = path + "result"+os.sep+"pcv_thre{}_comparison".format(pcv_thre)
@@ -95,7 +97,7 @@ if __name__ == "__main__":
     centers, lines = [], [] # XY座標による主成分分析時の平均・主成分ベクトル
     mae0, maes_sep = [],[] # 値域ごとのMAE
     cm_bwr = plt.get_cmap("bwr") # 青から赤へのカラーマップ
-
+    labels = []
 
     exist_ = exist.astype("float32")[np.newaxis,:,:,np.newaxis]
     img_sph = compSpatialHist(imgs.astype("float32"),exist_) # original histogram
