@@ -2,7 +2,10 @@
 from keras.utils import conv_utils
 from keras import backend as K
 from keras.engine import InputSpec
-from keras.layers import Conv2D
+from keras.layers import Conv2D, BatchNormalization, Activation, UpSampling2D, Dropout, LeakyReLU
+from keras.layers.merge import Concatenate
+
+import tensorflow as tf
 
 class PConv2D(Conv2D):
     def __init__(self, *args, n_channels=3, mono=False, **kwargs):
@@ -18,12 +21,12 @@ class PConv2D(Conv2D):
             channel_axis = 1
         else:
             channel_axis = -1
-            
+
         if input_shape[0][channel_axis] is None:
             raise ValueError('The channel dimension of the inputs should be defined. Found `None`.')
-            
-        self.input_dim = input_shape[0][channel_axis]
         
+        self.input_dim = input_shape[0][channel_axis]
+
         # Image kernel
         kernel_shape = self.kernel_size + (self.input_dim, self.filters)
         self.kernel = self.add_weight(shape=kernel_shape,
@@ -42,7 +45,7 @@ class PConv2D(Conv2D):
 
         # Window size - used for normalization
         self.window_size = self.kernel_size[0] * self.kernel_size[1]
-        
+
         if self.use_bias:
             self.bias = self.add_weight(shape=(self.filters,),
                                         initializer=self.bias_initializer,
@@ -61,7 +64,6 @@ class PConv2D(Conv2D):
         set to 1.
         Subsequently, we clip mask values to between 0 and 1
         ''' 
-
         # Both image and mask must be supplied
         if type(inputs) is not list or len(inputs) != 2:
             raise Exception('PartialConvolution2D must be called on a list of two tensors [img, mask]. Instead got: ' + str(inputs))
@@ -141,4 +143,42 @@ class PConv2D(Conv2D):
             new_shape = (input_shape[0], self.filters) + tuple(new_space)
             return [new_shape, new_shape]
 
-            
+
+class Encoder(tf.keras.layers.Layer):
+    def __init__(self, filters, kernel_size, iterNum, bn=True, istraining=True):
+        super(Encoder, self).__init__()
+        self.pconv2d = PConv2D(filters, kernel_size, strides=2, padding='same')
+        self.count = iterNum
+        self.bn = bn
+        self.training = istraining
+        self.batchnorm = BatchNormalization(name='EncBN'+str(self.count))
+        self.relu = Activation('relu')
+
+    def call(self,img_in,mask_in):
+        conv,mask = self.pconv2d([img_in,mask_in])
+        if self.bn:
+            conv = self.batchnorm(conv,training=self.training)
+        conv = self.relu(conv)
+        return conv, mask
+
+class Decoder(tf.keras.layers.Layer):
+    def __init__(self, filters, kernel_size, bn=True):
+        super(Decoder, self).__init__()
+        self.bn = bn
+        self.upsample = UpSampling2D(size=(2,2))
+        self.concatenate = Concatenate(axis=3)
+        self.pconv2d = PConv2D(filters, kernel_size, padding='same')
+        self.batchnorm = BatchNormalization()
+        self.leakyrelu = LeakyReLU(alpha=0.2)
+    
+    def call(self,img_in,mask_in, e_conv, e_mask):
+        up_img = self.upsample(img_in)
+        up_mask = self.upsample(mask_in)
+        conc_img = self.concatenate([e_conv,up_img])
+        conc_mask = self.concatenate([e_mask,up_mask])
+        conv,mask = self.pconv2d([conc_img,conc_mask])
+        if self.bn:
+            conv = self.batchnorm(conv)
+        conv = self.leakyrelu(conv)
+        return conv, mask
+

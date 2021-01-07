@@ -23,12 +23,13 @@ from matplotlib import pyplot as plt
 from PIL import Image
 
 from libs.pconv_model import PConvUnet
-from libs.util import MaskGenerator,ImageChunker,rangeError,nonhole,cmap,calcPCV1,clip,calcLabeledError
+from libs.util import MaskGenerator,ImageChunker,rangeError,nonhole,cmap,calcPCV1,clip,calcLabeledError,PSNR
 from libs.createSpatialHistogram import compSpatialHist, compKL
 
 import pickle
 import cv2
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
 
 
 def analyse(x):#x = [n,d]
@@ -47,13 +48,13 @@ def parse_args():
     parser.add_argument('-test','--test',type=str,default="", help="テスト画像のパス")
     parser.add_argument('-posVar','--isPositionVariant',action='store_true',help='位置によってデータの種類が異なる場合に使用')
 
-    return  parser.parse_args()
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
 
     args = parse_args()
-    dspath = "data" + os.sep + args.dataset+os.sep
+    dspath = "data" + os.sep + args.dataset + os.sep
     pcv_thre = args.pcv_thre
     test_imgs_path = ".{0}data{0}{1}{0}test{0}test_img{0}*.png".format(os.sep,dspath) if args.test=="" else args.test
 
@@ -65,12 +66,15 @@ if __name__ == "__main__":
     shape = (512,512)
     TEST_PICKLE = dspath+"test.pickle"
     TEST_MASK_PICKLE = dspath+"test_mask.pickle"
-    # exist = np.array(Image.open("data/sea.png"))/255
-    exist = np.ones(shape) # 観測部分が１となる画像(マスク画像とは別の未観測地点がある場合に使用(Toyデータでは使用しないため全て１))
+    if "quake" in dspath:
+        exist = np.array(Image.open("data/sea.png"))/255
+    else:
+        # 観測部分が１となる画像(マスク画像とは別の未観測地点がある場合に使用(Toyデータでは使用しないため全て１))
+        exist = np.ones(shape)
     exist_rgb = np.tile(exist[:,:,np.newaxis],(1,1,3)) # カラー画像による可視化時に用いる
     BATCH_SIZE = 4
 
-    pdb.set_trace()
+    #pdb.set_trace()
     # names, imgs, masks, labels = [], [], [], []
     tmp = pickle.load(open(TEST_PICKLE,"rb"))
     imgs = tmp["images"]
@@ -84,7 +88,7 @@ if __name__ == "__main__":
     model.load(r"{}logs/{}_model/{}".format(path,args.dataset,model_name), train_bn=False)
     chunker = ImageChunker(512, 512, 30)
 
-    # テスト結果の出力先ディレクトリを作成    
+    # テスト結果の出力先ディレクトリを作成
     result_path = path+"result"+os.sep+"test"
     compare_path = path+"result"+os.sep+"comparison"
     pcv_path = path + "result"+os.sep+"pcv_thre{}_comparison".format(pcv_thre)
@@ -95,7 +99,8 @@ if __name__ == "__main__":
     
     errors, maes, mses = [],[],[] # 偏差,MAE,MSE
     centers, lines = [], [] # XY座標による主成分分析時の平均・主成分ベクトル
-    mae0, maes_sep = [],[] # 値域ごとのMAE
+    mae0, maes_sep = [],[] # 値域ごとのMAE(0の地点とその他0.1間隔での誤差)
+    psnrs = [] # 非穴部分のPSNR
     cm_bwr = plt.get_cmap("bwr") # 青から赤へのカラーマップ
     labels = []
 
@@ -133,18 +138,20 @@ if __name__ == "__main__":
 
         #================================================
         # 非欠損部分の抽出・誤差の計算
-        gt_nonh = nonhole(img,exist)
-        pred_nonh = nonhole(pred,exist)
+        gt_nonh = nonhole(img,exist) # ground truth の非穴部
+        pred_nonh = nonhole(pred,exist) # predict の非穴部
 
         mae_all = np.mean(np.abs(img-pred))
 
         err = pred-img
         mae_grand = np.mean(np.abs(gt_nonh-pred_nonh))
         mse_grand = np.mean((gt_nonh-pred_nonh)**2) # MSEは輝度=>応答スペクトルに変換して計算
+        psnr = PSNR(pred_nonh,gt_nonh)
 
         errors.append(err)
         maes.append(mae_grand)
         mses.append(mse_grand)
+        psnrs.append(psnr)
 
         #==========================================================================================
         # 入力・予測・真値の比較
@@ -178,7 +185,6 @@ if __name__ == "__main__":
         sep_errs = [rangeError(pred,img,domain=[i*0.1,(i+1)*0.1]) for i in range(10)]
         mae0.append(e0)
         maes_sep.append(sep_errs)
-                
         axes[2,-1].plot(np.array([(i+1)*0.1 for i in range(10)]),sep_errs)
 
         # AE map
@@ -231,7 +237,6 @@ if __name__ == "__main__":
         #"""
         #==========================================================================================
         # Spatial Histogram
-        # pdb.set_trace()
         pred_sph = compSpatialHist(pred.astype("float32")[np.newaxis,:,:,np.newaxis],exist_) # prediction histogram
         pred_p,klp = sess.run([pred_sph,compKL(pred_sph,img_sph[ite:ite+1])])
 
@@ -285,12 +290,14 @@ if __name__ == "__main__":
     #"""
     # 分析結果の保存・表示
     summary_data = {
+        "PSNR":np.mean(np.array(psnrs)),
         "MAE":np.mean(np.array(maes)),
         "MSE":np.mean(np.array(mses)),
         "MAE0":np.mean(np.array(mae0)),
         "MAE-sep0.1":np.mean(np.array(maes_sep))
     }
 
+    print("\nPSNR={0:.10f}".format(summary_data["PSNR"]))
     print("MSE={0:.10f}, MAE={1:.10f}".format(summary_data["MSE"],summary_data["MAE"]))
 
     if args.isPositionVariant:

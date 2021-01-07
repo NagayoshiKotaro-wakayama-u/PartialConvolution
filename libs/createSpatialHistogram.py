@@ -33,9 +33,9 @@ def compSpatialHist(x,exist,kSize=64,sSize=4,isNormMode='sum',thre=0.05):
     x_conv_flat = tf.reshape(x_conv,[shape[0],shape[1]*shape[2]])
 
     if isNormMode == 'max':
-        x_conv_flat = x_conv_flat/tf.reduce_max(x_conv_flat,axis=1,keep_dims=True)
+        x_conv_flat = x_conv_flat/tf.reduce_max(x_conv_flat,axis=1,keepdims=True)
     elif isNormMode == 'sum':
-        x_conv_flat = x_conv_flat/tf.reduce_sum(x_conv_flat,axis=1,keep_dims=True)
+        x_conv_flat = x_conv_flat/tf.reduce_sum(x_conv_flat,axis=1,keepdims=True)
 
     x_conv = tf.reshape(x_conv_flat,[shape[0],shape[1],shape[2]])
 

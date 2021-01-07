@@ -69,6 +69,7 @@ def parse_args():
     parser.add_argument('-KLthre', '--KLthre',type=float, default=0.4,help='threshold value of KLloss')
     parser.add_argument('-KL','--KL',action='store_true',help="Flag for using KL-loss function")
     parser.add_argument('-histKL','--histKL',action='store_true',help="Flag for using spatial Histogram KL-loss function")
+    parser.add_argument('-histFilterSize','--histFilterSize',type=int,default=64,help="size of filter to make a histogram (default=64)" )
     parser.add_argument('-epochs','--epochs',type=int,default=100,help='training epoch')
         
     return  parser.parse_args()
@@ -175,8 +176,10 @@ if __name__ == '__main__':
     TEST_PICKLE = dspath+"test.pickle" if args.test=="" else args.test
     TEST_MASK_PICKLE = dspath+"test_mask.pickle" if args.testmask=="" else args.testmask
 
-    # SEA_PATH = ".{0}data{0}sea.png".format(os.sep)
-    SEA_PATH = ""
+    if "quake" in dataset:
+        SEA_PATH = ".{0}data{0}sea.png".format(os.sep)
+    else:
+        SEA_PATH = ""
     train_Num = pickle.load(open(TRAIN_PICKLE,"rb"))["images"].shape[0] # 画像の枚数をカウント
     valid_Num = pickle.load(open(VALID_PICKLE,"rb"))["images"].shape[0]
     img_w = 512
@@ -237,7 +240,7 @@ if __name__ == '__main__':
     history = LossHistory(loss_path)
     
     # Build the model
-    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= args.KL,isUsedHistKL=args.histKL,exist_point_file=SEA_PATH,exist_flag=True)
+    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= args.KL,isUsedHistKL=args.histKL,exist_point_file=SEA_PATH,exist_flag=True,histFSize=args.histFilterSize)
     
     # Loading of checkpoint（デフォルトではロードせずに初めから学習する）
     if args.checkpoint:

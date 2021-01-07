@@ -4,15 +4,18 @@ import numpy as np
 from datetime import datetime
 import pdb
 
-import tensorflow as tf
+# import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
+
 from keras.models import Model
 from keras.optimizers import Adam
-from keras.layers import Input, Conv2D, UpSampling2D, Dropout, LeakyReLU, BatchNormalization, Activation, Lambda, Multiply
+from keras.layers import Input, Conv2D, UpSampling2D, Dropout, LeakyReLU, Lambda, Multiply
 from keras.layers.merge import Concatenate
 from keras import backend as K
 from keras.utils.multi_gpu_utils import multi_gpu_model
 
-from libs.pconv_layer import PConv2D
+from libs.pconv_layer import PConv2D,Encoder,Decoder
 from libs.createSpatialHistogram import compSpatialHist,compKL
 from PIL import Image
 
@@ -20,7 +23,6 @@ def calcDet(lis,dim):
     if not(dim ==2 or dim==3):
         print("Can't calculate Determinant ( calculate only dimension 2 or 3 )")
         return None
-
     if dim==2:
         det = lis[0][0]*lis[1][1] - lis[0][1]*lis[1][0]
     elif dim==3:
@@ -28,10 +30,9 @@ def calcDet(lis,dim):
 
     return det
 
-
 class PConvUnet(object):
 
-    def __init__(self, img_rows=512, img_cols=512, inference_only=False, net_name='default', gpus=1, KLthre=0.1, isUsedKL=True,isUsedHistKL=True, exist_point_file="",exist_flag=False):
+    def __init__(self, img_rows=512, img_cols=512, inference_only=False, net_name='default', gpus=1, KLthre=0.1, isUsedKL=True,isUsedHistKL=True, exist_point_file="",exist_flag=False,histFSize=64):
         """Create the PConvUnet. If variable image size, set img_rows and img_cols to None
 
         Args:
@@ -56,6 +57,7 @@ class PConvUnet(object):
         self.isUsedKL = isUsedKL
         self.isUsedHistKL = isUsedHistKL
         self.existFlag = exist_flag
+        self.histFSize = histFSize
 
         # X座標,Y座標の行列
         self.Xmap = K.constant(np.tile([[i for i in range(self.img_cols)]],(self.img_rows,1))[np.newaxis,:,:,np.newaxis])
@@ -74,61 +76,54 @@ class PConvUnet(object):
         # Set current epoch
         self.current_epoch = 0
 
+        #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        # INPUTS
+        self.inputs_img = Input((self.img_rows, self.img_cols, 1), name='inputs_img')
+        self.inputs_mask = Input((self.img_rows, self.img_cols, 1), name='inputs_mask')
+
+        # decide model
+        self.encoder1 = Encoder(64, 7, 1, bn=False)
+        self.encoder2 = Encoder(128,5, 2)
+        self.encoder3 = Encoder(256,5, 3)
+        self.encoder4 = Encoder(512,3, 4)
+        self.encoder5 = Encoder(512,3, 5)
+        
+        self.decoder6 = Decoder(512, 3)
+        self.decoder7 = Decoder(256,3)
+        self.decoder8 = Decoder(128,3)
+        self.decoder9 = Decoder(64,3)
+        self.decoder10 = Decoder(3,3,bn=False)
+        self.conv2d = Conv2D(1,1,activation='sigmoid',name='output_img')
+        #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        self.ones33 = K.ones(shape=(3, 3, 1, 1))
+
         # Create UNet-like model
         if self.gpus <= 1:
-            self.model, inputs_mask = self.build_pconv_unet()
-            self.compile_pconv_unet(self.model, inputs_mask)
+            self.model = Model(inputs=[self.inputs_img, self.inputs_mask], outputs=self.build_pconv_unet())
+            self.compile_pconv_unet(self.model, self.inputs_mask)
         else:
             with tf.device("/cpu:0"):
-                self.model, inputs_mask = self.build_pconv_unet()
+                self.model = Model(inputs=[self.inputs_img, self.inputs_mask], outputs=self.build_pconv_unet())
             self.model = multi_gpu_model(self.model, gpus=self.gpus)
-            self.compile_pconv_unet(self.model, inputs_mask)
+            self.compile_pconv_unet(self.model, self.inputs_mask)
 
     def build_pconv_unet(self, train_bn=True):
+        e_conv1, e_mask1 = self.encoder1(self.inputs_img,self.inputs_mask)
+        e_conv2, e_mask2 = self.encoder2(e_conv1,e_conv1)
+        e_conv3, e_mask3 = self.encoder3(e_conv2,e_conv2)
+        e_conv4, e_mask4 = self.encoder4(e_conv3,e_conv3)
+        e_conv5, e_mask5 = self.encoder5(e_conv4,e_conv4)
 
-        # INPUTS
-        inputs_img = Input((self.img_rows, self.img_cols, 1), name='inputs_img')
-        inputs_mask = Input((self.img_rows, self.img_cols, 1), name='inputs_mask')
+        d_conv6, d_mask6 = self.decoder6(e_conv5, e_mask5, e_conv4, e_mask4)
+        d_conv7, d_mask7 = self.decoder7(d_conv6, d_mask6, e_conv3, e_mask3)
+        d_conv8, d_mask8 = self.decoder8(d_conv7, d_mask7, e_conv2, e_mask2)
+        d_conv9, d_mask9 = self.decoder9(d_conv8, d_mask8, e_conv1, e_mask1)
+        d_conv10, _ = self.decoder10(d_conv9, d_mask9, self.inputs_img, self.inputs_mask)
 
-        # ENCODER
-        def encoder_layer(img_in, mask_in, filters, kernel_size, bn=True):
-            conv, mask = PConv2D(filters, kernel_size, strides=2, padding='same')([img_in, mask_in])
-            if bn:
-                conv = BatchNormalization(name='EncBN'+str(encoder_layer.counter))(conv, training=train_bn)
-            conv = Activation('relu')(conv)
-            encoder_layer.counter += 1
-            return conv, mask
-        encoder_layer.counter = 0
+        outputs = self.conv2d(d_conv10)
 
-        e_conv1, e_mask1 = encoder_layer(inputs_img, inputs_mask, 64, 7, bn=False)
-        e_conv2, e_mask2 = encoder_layer(e_conv1, e_mask1, 128, 5)
-        e_conv3, e_mask3 = encoder_layer(e_conv2, e_mask2, 256, 5)
-        e_conv4, e_mask4 = encoder_layer(e_conv3, e_mask3, 512, 3)
-        e_conv5, e_mask5 = encoder_layer(e_conv4, e_mask4, 512, 3)
-
-        # DECODER
-        def decoder_layer(img_in, mask_in, e_conv, e_mask, filters, kernel_size, bn=True):
-            up_img = UpSampling2D(size=(2,2))(img_in)
-            up_mask = UpSampling2D(size=(2,2))(mask_in)
-            concat_img = Concatenate(axis=3)([e_conv,up_img])
-            concat_mask = Concatenate(axis=3)([e_mask,up_mask])
-            conv, mask = PConv2D(filters, kernel_size, padding='same')([concat_img, concat_mask])
-            if bn:
-                conv = BatchNormalization()(conv)
-            conv = LeakyReLU(alpha=0.2)(conv)
-            return conv, mask
-
-        d_conv6, d_mask6 = decoder_layer(e_conv5, e_mask5, e_conv4, e_mask4, 512, 3)
-        d_conv7, d_mask7 = decoder_layer(d_conv6, d_mask6, e_conv3, e_mask3, 256, 3)
-        d_conv8, d_mask8 = decoder_layer(d_conv7, d_mask7, e_conv2, e_mask2, 128, 3)
-        d_conv9, d_mask9 = decoder_layer(d_conv8, d_mask8, e_conv1, e_mask1, 64, 3)
-        d_conv10, _ = decoder_layer(d_conv9, d_mask9, inputs_img, inputs_mask, 3, 3, bn=False)
-        outputs = Conv2D(1, 1, activation = 'sigmoid', name='outputs_img')(d_conv10)
-        
-        # Setup the model inputs / outputs
-        model = Model(inputs=[inputs_img, inputs_mask], outputs=outputs)
-
-        return model, inputs_mask
+        # return Model(inputs=[inputs_img, inputs_mask], outputs=outputs), inputs_mask
+        return outputs
 
     def compile_pconv_unet(self, model, inputs_mask, lr=0.0002):
         model.compile(
@@ -144,6 +139,7 @@ class PConvUnet(object):
         """
         def loss(y_true, y_pred):
 
+            # pdb.set_trace()
             # Compute predicted image with non-hole pixels set to ground truth
             y_comp = mask * y_true + (1-mask) * y_pred
 
@@ -178,8 +174,8 @@ class PConvUnet(object):
         X1 = pred*self.Xmap
         Y1 = pred*self.Ymap
         num1 = tf.reduce_sum(pred) + 10e-6
-        muX1 = tf.reduce_sum(X1,axis=[1,2],keep_dims=True)/num1 # shape=[N,1,1,1] 
-        muY1 = tf.reduce_sum(Y1,axis=[1,2],keep_dims=True)/num1
+        muX1 = tf.reduce_sum(X1,axis=[1,2],keepdims=True)/num1 # shape=[N,1,1,1] 
+        muY1 = tf.reduce_sum(Y1,axis=[1,2],keepdims=True)/num1
 
         # y_trueの中でthre以上の値の座標を取り出すためのマスクを作成
         true = y_true*self.exist
@@ -189,8 +185,8 @@ class PConvUnet(object):
         X2 = true*self.Xmap
         Y2 = true*self.Ymap
         num2 = tf.reduce_sum(true) + 10e-6
-        muX2 = tf.reduce_sum(X2,axis=[1,2],keep_dims=True)/num2
-        muY2 = tf.reduce_sum(Y2,axis=[1,2],keep_dims=True)/num2
+        muX2 = tf.reduce_sum(X2,axis=[1,2],keepdims=True)/num2
+        muY2 = tf.reduce_sum(Y2,axis=[1,2],keepdims=True)/num2
 
         # 分散共分散行列
         disX1 = tf.abs((X1-muX1)*pred)
@@ -219,15 +215,14 @@ class PConvUnet(object):
         d_mu = [tf.squeeze(muX1-muX2,axis=[1,2,3]), tf.squeeze(muY1-muY2,axis=[1,2,3])]
         sq = ((d_mu[0]**2)*cov2[1][1] - 2*d_mu[0]*d_mu[1]*cov2[0][1] + (d_mu[1]**2)*cov2[0][0] )/(det2+1e-10)
 
-        KL = 0.5*(tf.log(det2/(det1+1e-10)) + tr21 + sq -dim)
+        KL = 0.5*(tf.math.log(det2/(det1+1e-10)) + tr21 + sq -dim)
 
         return KL
 
     def loss_spatialHistKL(self,y_true,y_pred):
-        p_true = compSpatialHist(y_true,self.exist,thre=self.KLthre)
-        p_pred = compSpatialHist(y_pred,self.exist,thre=self.KLthre)
+        p_true = compSpatialHist(y_true,self.exist,thre=self.KLthre,kSize=self.histFSize)
+        p_pred = compSpatialHist(y_pred,self.exist,thre=self.KLthre,kSize=self.histFSize)
         return compKL(p_true,p_pred)
-
 
     def loss_hole(self, mask, y_true, y_pred):
         """Pixel L1 loss within the hole / mask"""
@@ -241,7 +236,7 @@ class PConvUnet(object):
         """Total variation loss, used for smoothing the hole region, see. eq. 6"""
 
         # Create dilated hole region using a 3x3 kernel of all 1s.
-        kernel = K.ones(shape=(3, 3, mask.shape[3], mask.shape[3]))
+        kernel = self.ones33
         dilated_mask = K.conv2d(1-mask, kernel, data_format='channels_last', padding='same')
 
         # Cast values to be [0., 1.], and compute dilated hole region of y_comp
@@ -261,7 +256,7 @@ class PConvUnet(object):
             *args: arguments to be passed to fit_generator
             **kwargs: keyword arguments to be passed to fit_generator
         """
-        self.model.fit_generator(
+        self.model.fit(
             generator,
             *args, **kwargs
         )
@@ -271,11 +266,6 @@ class PConvUnet(object):
         print(self.model.summary())
 
     def load(self, filepath, train_bn=True, lr=0.0002):
-
-        # Create UNet-like model
-        self.model, inputs_mask = self.build_pconv_unet(train_bn)
-        self.compile_pconv_unet(self.model, inputs_mask, lr)
-
         # Load weights into model
         epoch = int(os.path.basename(filepath).split('.')[1].split('-')[0])
         assert epoch > 0, "Could not parse weight file. Should include the epoch"
@@ -336,3 +326,5 @@ class PConvUnet(object):
     def predict(self, sample, **kwargs):
         """Run prediction using this model"""
         return self.model.predict(sample, **kwargs)
+
+
