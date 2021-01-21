@@ -3,6 +3,9 @@ from random import randint, seed
 import numpy as np
 import cv2
 import pdb
+import keras
+from keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback,Callback
+
 
 def rangeError(pre,tru,domain=[-1.0,0.0],opt="MA"): # 欠損部含めた誤差 pred:予測値, true:真値 , domain:値域(domain[0]< y <=domain[1])
     # ある値域の真値のみで誤差を測る
@@ -95,6 +98,107 @@ def calcLabeledError(errors,labels,opt="MA"):
 
 def PSNR(y_pred,y_true):
     return - 10.0 * np.log(np.mean(np.square(y_pred - y_true))) / np.log(10.0)
+
+class PSNREarlyStopping(ModelCheckpoint):
+
+    def __init__(self,savepath,log_path,dataset):
+        super(PSNREarlyStopping,self).__init__(
+            os.path.join(log_path, dataset+'_model', 'weights.{epoch:02d}.h5'),
+            monitor='val_PSNR', 
+            save_best_only=False, 
+            save_weights_only=True,
+            period = 1
+        )
+        self.best_val_PSNR = -1000
+        self.history_val_PSNR = []
+        self.best_weights   = None
+        self.now_epoch = 0
+        
+        # ロスなどの記録
+        if not os.path.isdir(savepath):
+            os.makedirs(savepath)
+        self.path = os.path.join(savepath,"training_losses.pickle")
+        self.types = ["loss","PSNR","loss_KL","loss_spaHistKL"]    
+        # training用
+        self.trainingLoss = {
+            self.types[0]:[],
+            self.types[1]:[],
+            self.types[2]:[],
+            self.types[3]:[]
+        }
+        # validation用
+        self.validationLoss = {
+            self.types[0]:[],
+            self.types[1]:[],
+            self.types[2]:[],
+            self.types[3]:[]
+        }
+
+    def on_batch_end(self, batch, logs={}): # バッチ終了時に呼び出される
+        for t in self.types:
+            self.trainingLoss[t].append(logs.get(t))
+
+    def on_epoch_end(self, epoch, logs=None):
+        # 検証ロスの保存
+        self.now_epoch += 1
+        for t in self.types:
+            self.validationLoss[t].append(logs.get("val_"+t))
+
+        self.epochs_since_last_save += 1
+        val_PSNR = logs['val_PSNR']
+        self.history_val_PSNR = np.append(self.history_val_PSNR,val_PSNR)
+        # pdb.set_trace()
+
+        # 検証データのPSNRの最大値を取得
+        if val_PSNR > self.best_val_PSNR:
+            self.best_val_PSNR = val_PSNR
+            
+        # 最大値より 1.5 以上小さいと終了
+        if self.best_val_PSNR - 1.5 > val_PSNR: 
+            self.model.stop_training = True
+            self._save_model(epoch=epoch, logs=logs)
+            self.on_train_end()
+            sys.exit()
+
+        # 10エポック以降で過去5エポックの最大値と比べてPSNRの変化が0.01以下なら終了
+        if (epoch+1) >= 10:
+            if self.best_val_PSNR < self.history_val_PSNR[:-5].max() + 0.01: 
+                self.model.stop_training = True
+                self._save_model(epoch=epoch, logs=logs)
+                self.on_train_end()
+                sys.exit()
+
+    def on_train_end(self,logs=None):
+        summary = {
+            "epochs":epochs,
+            "end_epoch":self.now_epoch,
+            "steps_per_epoch":steps_per_epoch
+        }
+
+        # summary に学習・検証の損失のデータを加える
+        for t in self.types:
+            summary[t] = self.trainingLoss[t]
+            summary["val_"+t] = self.validationLoss[t]
+
+        with open(self.path,"wb") as f:
+            pickle.dump(summary,f)
+        
+        for lossName in self.types:
+            loss = summary[lossName]
+            plt.plot(range(epochs*steps_per_epoch),loss)
+            plt.xlabel('Iteration (1epoch={}ite)'.format(steps_per_epoch))
+            plt.ylabel(lossName)
+            plt.title(args.experiment)
+            plt.savefig(os.path.join(loss_path,lossName+".png"))
+            plt.close()
+
+            loss = summary["val_"+lossName]
+            plt.plot(range(epochs),loss)
+            plt.xlabel('Epoch')
+            plt.ylabel("val_"+lossName)
+            plt.title(args.experiment)
+            plt.savefig(os.path.join(loss_path,"val_"+lossName+".png"))
+            plt.close()
 
 class MaskGenerator():
 

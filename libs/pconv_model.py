@@ -14,9 +14,11 @@ from keras.layers import Input, Conv2D, UpSampling2D, Dropout, LeakyReLU, Lambda
 from keras.layers.merge import Concatenate
 from keras import backend as K
 from keras.utils.multi_gpu_utils import multi_gpu_model
+from keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback,Callback
+from keras_tqdm import TQDMCallback
 
 from libs.pconv_layer import PConv2D,Encoder,Decoder
-from libs.createSpatialHistogram import compSpatialHist,compKL
+# from libs.createSpatialHistogram import compSpatialHist,compKL
 from PIL import Image
 
 def calcDet(lis,dim):
@@ -32,7 +34,9 @@ def calcDet(lis,dim):
 
 class PConvUnet(object):
 
-    def __init__(self, img_rows=512, img_cols=512, inference_only=False, net_name='default', gpus=1, KLthre=0.1, isUsedKL=True,isUsedHistKL=True, exist_point_file="",exist_flag=False,histFSize=64):
+    def __init__(self, img_rows=512, img_cols=512,
+     inference_only=False, net_name='default', gpus=1, KLthre=0.1, histKLthre=0.05,
+     isUsedKL=True, isUsedHistKL=True, exist_point_file="", exist_flag=False, histFSize=64):
         """Create the PConvUnet. If variable image size, set img_rows and img_cols to None
 
         Args:
@@ -44,7 +48,6 @@ class PConvUnet(object):
             KLthre (float): threshold of KL-loss.
             exist_point_file (str): 存在する点が１・その他が０である入力と同サイズの画像のパス（入力画像内に欠損部以外の未観測点がある場合に使用）
         """
-
         # Settings
         self.img_rows = img_rows
         self.img_cols = img_cols
@@ -54,6 +57,7 @@ class PConvUnet(object):
         self.gpus = gpus
         self.losses = None
         self.KLthre = KLthre
+        self.histKLthre = histKLthre
         self.isUsedKL = isUsedKL
         self.isUsedHistKL = isUsedHistKL
         self.existFlag = exist_flag
@@ -220,9 +224,41 @@ class PConvUnet(object):
         return KL
 
     def loss_spatialHistKL(self,y_true,y_pred):
-        p_true = compSpatialHist(y_true,self.exist,thre=self.KLthre,kSize=self.histFSize)
-        p_pred = compSpatialHist(y_pred,self.exist,thre=self.KLthre,kSize=self.histFSize)
-        return compKL(p_true,p_pred)
+        # pdb.set_trace()
+        p_true = self.compSpatialHist(y_true, kSize=self.histFSize, thre=self.histKLthre)
+        p_pred = self.compSpatialHist(y_pred, kSize=self.histFSize, thre=self.histKLthre)
+        return self.compKL(p_true,p_pred)
+
+    def compKL(self,p1,p2,smallV=1e-10):
+        shape = tf.shape(p1)
+        p1_reshape = tf.reshape(p1,[shape[0],-1])
+        p2_reshape = tf.reshape(p2,[shape[0],-1])
+        kl = tf.reduce_sum(p1_reshape*(tf.math.log(p1_reshape+smallV) - tf.math.log(p2_reshape+smallV)),axis=1)
+        return kl
+
+    def compSpatialHist(self,x, kSize=64, sSize=4, isNormMode='sum', thre=0.05):
+        # pdb.set_trace()
+        # binarize images
+        x_bin = x*self.exist
+        x_bin = tf.nn.relu(x_bin - thre)
+        x_bin = tf.math.sign(x_bin)
+
+        # kernel with all ones
+        kernel = np.ones([kSize,kSize,1,1])
+        kernel = tf.constant(kernel, dtype=tf.float32)
+        
+        # histogram using conv2d
+        x_conv = tf.nn.conv2d(x_bin,kernel,strides=[1,sSize,sSize,1],padding='VALID')
+        shape = tf.shape(x_conv)
+        x_conv_flat = tf.reshape(x_conv,[shape[0],shape[1]*shape[2]])
+
+        if isNormMode == 'max':
+            x_conv_flat = x_conv_flat/tf.reduce_max(x_conv_flat,axis=1,keepdims=True)
+        elif isNormMode == 'sum':
+            x_conv_flat = x_conv_flat/tf.reduce_sum(x_conv_flat,axis=1,keepdims=True)
+
+        x_conv = tf.reshape(x_conv_flat,[shape[0],shape[1],shape[2]])
+        return x_conv
 
     def loss_hole(self, mask, y_true, y_pred):
         """Pixel L1 loss within the hole / mask"""
@@ -326,5 +362,4 @@ class PConvUnet(object):
     def predict(self, sample, **kwargs):
         """Run prediction using this model"""
         return self.model.predict(sample, **kwargs)
-
 

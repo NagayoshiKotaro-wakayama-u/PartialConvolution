@@ -42,7 +42,7 @@ def analyse(x):#x = [n,d]
 def parse_args():
     parser = ArgumentParser(description="学習済みのパラメータでテストをし、真値との比較や分析結果の保存を行います")
     parser.add_argument('dir_name',help="実験名(ログファイルのディレクトリ名でxxxx_logsのxxxxの部分のみ)")
-    parser.add_argument('model',help="学習済みのweightのファイル名(例：weights.150-0.13.h5)")
+    parser.add_argument('model',help="学習済みのweightファイルのエポック番号( weights.〇〇.h5 の〇〇の部分)")
     parser.add_argument('-dataset','--dataset',type=str,default='gaussianToyData',help="データセットのディレクトリ名")
     parser.add_argument('-thre','--pcv_thre', type=float, default=0.4, help="固有ベクトル計算時の閾値")
     parser.add_argument('-test','--test',type=str,default="", help="テスト画像のパス")
@@ -84,16 +84,17 @@ if __name__ == "__main__":
 
     # モデルをビルドし,学習した重みをロード
     model = PConvUnet(img_rows=imgs.shape[1],img_cols=imgs.shape[2],inference_only=True)
-    model_name = args.model
+    model_name = "weights.{}.h5".format(args.model)
     model.load(r"{}logs/{}_model/{}".format(path,args.dataset,model_name), train_bn=False)
     chunker = ImageChunker(512, 512, 30)
 
     # テスト結果の出力先ディレクトリを作成
-    result_path = path+"result"+os.sep+"test"
-    compare_path = path+"result"+os.sep+"comparison"
-    pcv_path = path + "result"+os.sep+"pcv_thre{}_comparison".format(pcv_thre)
-    hist_path = path + "result" + os.sep + "spatialHist_thre{}".format(pcv_thre)
-    for DIR in [result_path,compare_path,pcv_path,hist_path]:
+    result_path = "result{}".format(args.model)
+    predict_path = path + result_path + os.sep + "test"
+    compare_path = path+ result_path +os.sep+"comparison"
+    pcv_path = path + result_path +os.sep+"pcv_thre{}_comparison".format(pcv_thre)
+    hist_path = path + result_path + os.sep + "spatialHist_thre{}".format(pcv_thre)
+    for DIR in [predict_path,compare_path,pcv_path,hist_path]:
         if not os.path.isdir(DIR):
             os.makedirs(DIR)
     
@@ -132,7 +133,7 @@ if __name__ == "__main__":
         # 予測結果を出力
         #"""
         tmp = (pred*255).astype("uint8")
-        cv2.imwrite(os.path.join(result_path,name), tmp)
+        cv2.imwrite(os.path.join(predict_path,name), tmp)
         #"""
         #================================================
 
@@ -180,7 +181,7 @@ if __name__ == "__main__":
             axes[1,i].hist(h,bins=bins,range=(0,maxs))
         
         
-        # 各震度値ごとのMAE 
+        # # 各震度値ごとのMAE 
         e0 = rangeError(pred,img,domain=[-1.0,0.0]) # 負の値は存在しないので0のみのMAEを計算できる
         sep_errs = [rangeError(pred,img,domain=[i*0.1,(i+1)*0.1]) for i in range(10)]
         mae0.append(e0)
@@ -284,7 +285,7 @@ if __name__ == "__main__":
 
     _,axes = plt.subplots(1,1,figsize=(6,5))
     axes.imshow(err*exist_rgb,vmin=0,vmax=1.0)
-    plt.savefig(path+"result"+os.sep+"mae_map.png")
+    plt.savefig(path+result_path+os.sep+"mae_map.png")
     #"""
 
     #"""

@@ -88,7 +88,7 @@ class PConv2D(Conv2D):
             padding='valid',
             data_format=self.data_format,
             dilation_rate=self.dilation_rate
-        )        
+        )
 
         # Calculate the mask ratio on each pixel in the output mask
         mask_ratio = self.window_size / (mask_output + 1e-8)
@@ -142,7 +142,6 @@ class PConv2D(Conv2D):
                 new_space.append(new_dim)
             new_shape = (input_shape[0], self.filters) + tuple(new_space)
             return [new_shape, new_shape]
-
 
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, filters, kernel_size, iterNum, bn=True, istraining=True):

@@ -6,6 +6,7 @@ import cv2
 import pickle
 import glob
 import pdb
+import sys
 
 from argparse import ArgumentParser
 from copy import deepcopy
@@ -71,7 +72,7 @@ def parse_args():
     parser.add_argument('-histKL','--histKL',action='store_true',help="Flag for using spatial Histogram KL-loss function")
     parser.add_argument('-histFilterSize','--histFilterSize',type=int,default=64,help="size of filter to make a histogram (default=64)" )
     parser.add_argument('-epochs','--epochs',type=int,default=100,help='training epoch')
-        
+
     return  parser.parse_args()
 
 # ディレクトリから画像を読み込み学習に使用する為のクラス（マスクの変形なども可能）
@@ -108,44 +109,115 @@ def Generator(imagePath, maskPath, batchSize):
             masked = mask*ori # masked image
             yield [masked, mask], ori # Returning mask
 
-# 損失の監視・保存に用いるクラス
-class LossHistory(Callback):
-    def __init__(self,savepath):
+
+class PSNREarlyStopping(ModelCheckpoint):
+
+    def __init__(self,savepath,log_path,dataset):
+        super(PSNREarlyStopping,self).__init__(
+            os.path.join(log_path, dataset+'_model', 'weights.{epoch:02d}.h5'),
+            monitor='val_PSNR', 
+            save_best_only=False, 
+            save_weights_only=True,
+            period = 1
+        )
+        self.best_val_PSNR = -1000
+        self.history_val_PSNR = []
+        self.best_weights   = None
+        self.now_epoch = 0
+        
+        # ロスなどの記録
         if not os.path.isdir(savepath):
             os.makedirs(savepath)
         self.path = os.path.join(savepath,"training_losses.pickle")
-        self.histKL = []
-        self.KL = []
-        self.PSNR = []
-        self.totalLoss = []
+        self.types = ["loss","PSNR","loss_KL","loss_spatialHistKL"]    
+        # training用
+        self.trainingLoss = {
+            self.types[0]:[],
+            self.types[1]:[],
+            self.types[2]:[],
+            self.types[3]:[]
+        }
+        # validation用
+        self.validationLoss = {
+            self.types[0]:[],
+            self.types[1]:[],
+            self.types[2]:[],
+            self.types[3]:[]
+        }
 
-    def on_batch_end(self, batch, logs={}): # バッチ終了時に呼び出される
-        self.histKL.append(logs.get("loss_spatialHistKL"))
-        self.KL.append(logs.get("loss_KL"))
-        self.PSNR.append(logs.get("PSNR"))
-        self.totalLoss.append(logs.get("loss"))
+    def on_train_batch_end(self, batch, logs={}): # バッチ終了時に呼び出される
+        # 訓練時のロスの保存
+        for t in self.types:
+            self.trainingLoss[t].append(logs.get(t))
 
-    def on_train_end(self, logs={}): # 学習終了時に全損失をpickleとして保存
-        types = ["Total","PSNR","KL","spaHistKL"]
+    def on_epoch_end(self, epoch, logs=None):
+        self.now_epoch += 1
+        # 検証時のロスの保存
+        for t in self.types:
+            self.validationLoss[t].append(logs.get("val_"+t))
+
+        # 過学習の検知
+        #=================================================================
+        self.epochs_since_last_save += 1
+        val_PSNR = logs['val_PSNR']
+        self.history_val_PSNR = np.append(self.history_val_PSNR,val_PSNR)
+        
+        # 検証データのPSNRの最大値を取得
+        if val_PSNR > self.best_val_PSNR:
+            self.best_val_PSNR = val_PSNR
+            
+        # 最大値より 1.5 以上小さいと終了
+        if self.best_val_PSNR - 1.5 > val_PSNR: 
+            self.model.stop_training = True
+            self.on_train_end()
+            sys.exit()
+
+        # 5エポック以降で、最大値と比べて0.5以上下がっているなら終了
+        if (epoch+1) >= 5:
+            if self.best_val_PSNR - 0.5 > val_PSNR:
+                self.model.stop_training = True
+                self.on_train_end()
+                sys.exit()
+
+        # 10回に1回モデルを保存
+        if (epoch+1)%10==0:
+            self._save_model(epoch=epoch, logs=logs)
+
+        #=================================================================
+
+
+    def on_train_end(self,logs=None):
+        self._save_model(epoch=self.now_epoch, logs=logs)
+
         summary = {
             "epochs":epochs,
-            "steps_per_epoch":steps_per_epoch,
-            types[0]:np.array(self.totalLoss),
-            types[1]:np.array(self.PSNR),
-            types[2]:np.array(self.KL),
-            types[3]:np.array(self.histKL)
+            "end_epoch":self.now_epoch,
+            "steps_per_epoch":steps_per_epoch
         }
+
+        # summary に学習・検証の損失のデータを加える
+        for t in self.types:
+            summary[t] = self.trainingLoss[t]
+            summary["val_"+t] = self.validationLoss[t]
 
         with open(self.path,"wb") as f:
             pickle.dump(summary,f)
         
-        for lossName in types:
+        for lossName in self.types:
             loss = summary[lossName]
-            plt.plot(range(epochs*steps_per_epoch),loss)
+            plt.plot(range(self.now_epoch*steps_per_epoch),loss)
             plt.xlabel('Iteration (1epoch={}ite)'.format(steps_per_epoch))
             plt.ylabel(lossName)
             plt.title(args.experiment)
             plt.savefig(os.path.join(loss_path,lossName+".png"))
+            plt.close()
+
+            loss = summary["val_"+lossName]
+            plt.plot(range(self.now_epoch),loss)
+            plt.xlabel('Epoch')
+            plt.ylabel("val_"+lossName)
+            plt.title(args.experiment)
+            plt.savefig(os.path.join(loss_path,"val_"+lossName+".png"))
             plt.close()
 
 # Run script
@@ -165,7 +237,6 @@ if __name__ == '__main__':
             os.makedirs(DIR)
 
     epochs = args.epochs
-
     dataset = args.dataset # データセットのディレクトリ
     dspath = ".{0}data{0}{1}{0}".format(os.sep,dataset)
 
@@ -236,11 +307,10 @@ if __name__ == '__main__':
             plt.savefig(os.path.join(path, 'img_{}_{}.png'.format(i, pred_time)))
             plt.close()
 
-    # 損失の記録
-    history = LossHistory(loss_path)
-    
+
     # Build the model
-    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= args.KL,isUsedHistKL=args.histKL,exist_point_file=SEA_PATH,exist_flag=True,histFSize=args.histFilterSize)
+    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= args.KL,
+    isUsedHistKL=args.histKL,exist_point_file=SEA_PATH,exist_flag=True,histFSize=args.histFilterSize)
     
     # Loading of checkpoint（デフォルトではロードせずに初めから学習する）
     if args.checkpoint:
@@ -262,15 +332,17 @@ if __name__ == '__main__':
                 log_dir=os.path.join(log_path, dataset+'_model'),
                 write_graph=False
             ),
-            ModelCheckpoint(
-                os.path.join(log_path, dataset+'_model', 'weights.{epoch:02d}-{loss:.2f}.h5'),
-                monitor='val_loss', 
-                save_best_only=False, 
-                save_weights_only=True,
-                period = 10
+            # ModelCheckpoint(
+            #     os.path.join(log_path, dataset+'_model', 'weights.{epoch:02d}.h5'),
+            #     monitor='val_loss', 
+            #     save_best_only=True, 
+            #     save_weights_only=True,
+            #     period = 1
+            # ),
+            PSNREarlyStopping(loss_path,log_path,dataset),
+            LambdaCallback( # 学習中のテスト出力が不必要ならLambdaCallbackをコメントアウト
+                on_epoch_end=lambda epoch,logs: plot_callback(model, test_path)
             ),
-            LambdaCallback(on_epoch_end=lambda epoch, logs: plot_callback(model, test_path)), # 学習中のテスト出力が不必要ならこの行をコメントアウト
-            history,
             TQDMCallback()
         ]
     )
