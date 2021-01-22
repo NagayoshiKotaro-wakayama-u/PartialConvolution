@@ -30,15 +30,12 @@ PartialConvolution/
                  ┃        ┗ test_samples/
                  ┣ data/
                  ┃    ┗ dataSet/
-                 ┃        ┣ train/
-                 ┃        ┃   ┗ train_img/
-                 ┃        ┣ train_mask/
-                 ┃        ┣ test/
-                 ┃        ┃   ┗ test_img/
-                 ┃        ┣ test_mask/
-                 ┃        ┣ valid/
-                 ┃        ┃   ┗ valid_img/
-                 ┃        ┗ valid_mask/
+                 ┃        ┣ train.pickle
+                 ┃        ┣ train_mask.pickle
+                 ┃        ┣ test.pickle
+                 ┃        ┣ test_mask.pickle
+                 ┃        ┣ valid.pickle
+                 ┃        ┗ valid_mask.pickle
                  ┣ libs/
                  ┃    ┣ pconv_layer.py
                  ┃    ┣ pconv_model.py
@@ -58,9 +55,9 @@ If you want to get more details, use `-h` option.
 ## test.py  
 After training, run this command to test the model.  
 `python test.py xxxx yyyy`  
-xxxx is the name of experiment. yyyy is the name of the weight file to be loaded.  
-For example
-`python test.py KLPConv weights.100-0.13.h5`
+xxxx is the name of experiment. yyyy is the epoch of the weight file to be loaded.  
+For example (epoch58 will be loaded)
+`python test.py KLPConv 58`
   
 The directory `result` is automatically created under `experiment` when you run this command.  
   
