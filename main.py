@@ -72,6 +72,7 @@ def parse_args():
     parser.add_argument('-histKL','--histKL',action='store_true',help="Flag for using spatial Histogram KL-loss function")
     parser.add_argument('-histFilterSize','--histFilterSize',type=int,default=64,help="size of filter to make a histogram (default=64)" )
     parser.add_argument('-epochs','--epochs',type=int,default=100,help='training epoch')
+    parser.add_argument('-esEpoch','--earlyStopEpoch',type=int,default=10)
 
     return  parser.parse_args()
 
@@ -160,21 +161,23 @@ class PSNREarlyStopping(ModelCheckpoint):
         #=================================================================
         self.epochs_since_last_save += 1
         val_PSNR = logs['val_PSNR']
-        self.history_val_PSNR = np.append(self.history_val_PSNR,val_PSNR)
+        self.history_val_PSNR.append(val_PSNR)
         
         # 検証データのPSNRの最大値を取得
         if val_PSNR > self.best_val_PSNR:
             self.best_val_PSNR = val_PSNR
             
         # 最大値より 1.5 以上小さいと終了
-        if self.best_val_PSNR - 1.5 > val_PSNR: 
-            self.model.stop_training = True
-            self.on_train_end()
-            sys.exit()
+        # if self.best_val_PSNR - 1.5 > val_PSNR: 
+        #     self.model.stop_training = True
+        #     self.on_train_end()
+        #     sys.exit()
 
-        # 5エポック以降で、最大値と比べて0.5以上下がっているなら終了
-        if (epoch+1) >= 5:
-            if self.best_val_PSNR - 0.5 > val_PSNR:
+        # 指定されたエポック(nエポック)以降で、過去5エポック分の最大値と比べて0.5以上下がっているなら終了
+        if (epoch+1) >= args.earlyStopEpoch:
+            # pdb.set_trace()
+            if self.best_val_PSNR - 0.5 > np.max(self.history_val_PSNR[-5:]):
+                print("best:{}, current:{}".format(np.max(self.best_val_PSNR,self.history_val_PSNR[:-5])))
                 self.model.stop_training = True
                 self.on_train_end()
                 sys.exit()
@@ -224,6 +227,7 @@ class PSNREarlyStopping(ModelCheckpoint):
 if __name__ == '__main__':
     # Parse command-line arguments
     args = parse_args()
+    
     if args.stage == 'finetune' and not args.checkpoint:
         raise AttributeError('If you are finetuning your model, you must supply a checkpoint file')
 
@@ -332,13 +336,6 @@ if __name__ == '__main__':
                 log_dir=os.path.join(log_path, dataset+'_model'),
                 write_graph=False
             ),
-            # ModelCheckpoint(
-            #     os.path.join(log_path, dataset+'_model', 'weights.{epoch:02d}.h5'),
-            #     monitor='val_loss', 
-            #     save_best_only=True, 
-            #     save_weights_only=True,
-            #     period = 1
-            # ),
             PSNREarlyStopping(loss_path,log_path,dataset),
             LambdaCallback( # 学習中のテスト出力が不必要ならLambdaCallbackをコメントアウト
                 on_epoch_end=lambda epoch,logs: plot_callback(model, test_path)

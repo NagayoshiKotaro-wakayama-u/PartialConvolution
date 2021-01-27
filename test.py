@@ -59,7 +59,7 @@ if __name__ == "__main__":
     test_imgs_path = ".{0}data{0}{1}{0}test{0}test_img{0}*.png".format(os.sep,dspath) if args.test=="" else args.test
 
     # path
-    path = ".{0}experiment{0}{1}_logs{0}".format(os.sep,args.dir_name)
+    path = ".{0}experiment{0}Log_EarlyStop_v1{0}{1}_logs{0}".format(os.sep,args.dir_name)
     if not os.path.isdir(path):
         os.makedirs(path)
 
@@ -128,6 +128,7 @@ if __name__ == "__main__":
             labels.append(label)
 
         width = 3 # 横のプロット数
+        # pdb.set_trace()
 
         #================================================
         # 予測結果を出力

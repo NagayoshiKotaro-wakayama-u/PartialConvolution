@@ -193,4 +193,3 @@ if __name__ == "__main__":
         dumpData = {"images":np.array(imgs),"labels":labels}
         pickle.dump(dumpData,open(path,"wb"))
         print("")
-
