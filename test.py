@@ -59,7 +59,7 @@ if __name__ == "__main__":
     test_imgs_path = ".{0}data{0}{1}{0}test{0}test_img{0}*.png".format(os.sep,dspath) if args.test=="" else args.test
 
     # path
-    path = ".{0}experiment{0}Log_EarlyStop_v1{0}{1}_logs{0}".format(os.sep,args.dir_name)
+    path = ".{0}experiment{0}{1}_logs{0}".format(os.sep,args.dir_name)
     if not os.path.isdir(path):
         os.makedirs(path)
 
@@ -86,7 +86,7 @@ if __name__ == "__main__":
     model = PConvUnet(img_rows=imgs.shape[1],img_cols=imgs.shape[2],inference_only=True)
     model_name = "weights.{}.h5".format(args.model)
     model.load(r"{}logs/{}_model/{}".format(path,args.dataset,model_name), train_bn=False)
-    chunker = ImageChunker(512, 512, 30)
+    chunker = ImageChunker(shape[0], shape[1], 30)
 
     # テスト結果の出力先ディレクトリを作成
     result_path = "result{}".format(args.model)

@@ -72,6 +72,7 @@ def parse_args():
     parser.add_argument('-histKL','--histKL',action='store_true',help="Flag for using spatial Histogram KL-loss function")
     parser.add_argument('-histFilterSize','--histFilterSize',type=int,default=64,help="size of filter to make a histogram (default=64)" )
     parser.add_argument('-epochs','--epochs',type=int,default=100,help='training epoch')
+    parser.add_argument('-es','--isEarlyStop',action='store_true',help="Flag for using Early stopping")
     parser.add_argument('-esEpoch','--earlyStopEpoch',type=int,default=10)
 
     return  parser.parse_args()
@@ -177,7 +178,7 @@ class PSNREarlyStopping(ModelCheckpoint):
         if (epoch+1) >= args.earlyStopEpoch:
             # pdb.set_trace()
             if self.best_val_PSNR - 0.5 > np.max(self.history_val_PSNR[-5:]):
-                print("best:{}, current:{}".format(np.max(self.best_val_PSNR,self.history_val_PSNR[:-5])))
+                # print("best:{}, current:{}".format(self.best_val_PSNR,np.max(self.history_val_PSNR[-5:])))
                 self.model.stop_training = True
                 self.on_train_end()
                 sys.exit()
@@ -305,8 +306,8 @@ if __name__ == '__main__':
                 ce = pcv[i][0]
                 axes[i].plot(line[1],line[0],colors[i]+'-')
                 axes[i].scatter(ce[1],ce[0],c=colors[i])
-                axes[i].set_xlim(0,511)
-                axes[i].set_ylim(511,0)
+                axes[i].set_xlim(0,img_w-1)
+                axes[i].set_ylim(img_h-1,0)
 
             plt.savefig(os.path.join(path, 'img_{}_{}.png'.format(i, pred_time)))
             plt.close()
@@ -323,7 +324,33 @@ if __name__ == '__main__':
         elif args.stage == 'finetune':
             model.load(args.checkpoint, train_bn=False, lr=0.00005)
 
-    # Fit model
+    # callback の設定
+    callbacks = [
+            TensorBoard(
+                log_dir=os.path.join(log_path, dataset+'_model'),
+                write_graph=False
+            ),
+            LambdaCallback( # 学習中のテスト出力が不必要ならこのLambdaCallbackをコメントアウト
+                on_epoch_end=lambda epoch,logs: plot_callback(model, test_path)
+            ),
+            TQDMCallback()
+        ]
+
+    if args.isEarlyStop:# PSNRを監視してアーリーストップ
+        callbacks.append(PSNREarlyStopping(loss_path,log_path,dataset))
+    else:# 通常の学習(数エポックに1回,モデルを保存)
+        callbacks.append(
+            ModelCheckpoint(
+                os.path.join(log_path, dataset+'_model', 'weights.{epoch:02d}.h5'),
+                monitor='val_PSNR', 
+                save_best_only=False, 
+                save_weights_only=True,
+                period = 10
+            )
+        )
+
+
+    # モデルの学習
     model.fit_generator(
         train_generator, 
         steps_per_epoch=steps_per_epoch,
@@ -331,16 +358,6 @@ if __name__ == '__main__':
         validation_steps=valid_Num,
         epochs=epochs,
         verbose=0,
-        callbacks=[
-            TensorBoard(
-                log_dir=os.path.join(log_path, dataset+'_model'),
-                write_graph=False
-            ),
-            PSNREarlyStopping(loss_path,log_path,dataset),
-            LambdaCallback( # 学習中のテスト出力が不必要ならLambdaCallbackをコメントアウト
-                on_epoch_end=lambda epoch,logs: plot_callback(model, test_path)
-            ),
-            TQDMCallback()
-        ]
+        callbacks=callbacks
     )
         
