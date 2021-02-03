@@ -103,7 +103,8 @@ class PConvUnet(object):
 
         # Create UNet-like model
         if self.gpus <= 1:
-            self.model = Model(inputs=[self.inputs_img, self.inputs_mask], outputs=self.build_pconv_unet())
+            self.outputs_img = self.build_pconv_unet()
+            self.model = Model(inputs=[self.inputs_img, self.inputs_mask], outputs=self.outputs_img)
             self.compile_pconv_unet(self.model, self.inputs_mask)
         else:
             with tf.device("/cpu:0"):
@@ -157,7 +158,7 @@ class PConvUnet(object):
             rslt = l1 + 6*l2 + 0.1*l3
             
             if self.isUsedKL:
-                rslt = rslt + l4
+                rslt = rslt + 0.01*l4
             
             if self.isUsedHistKL:
                 rslt = rslt + l5
@@ -168,12 +169,12 @@ class PConvUnet(object):
         return loss
 
     # assume gaussian
-    def loss_KL(self,y_true, y_pred,dim=2):
+    def loss_KL_debug(self,y_true, y_pred,dim=2):
         thre = self.KLthre
         # y_predの中でthre以上の値の座標を取り出すためのマスクを作成
         pred = y_pred*self.exist # shape=[N,512,512,1]
-        pred = tf.nn.relu(pred - thre)
-        pred = tf.math.sign(pred)
+        # pred = tf.nn.relu(pred - thre)
+        # pred = tf.math.sign(pred)
         # マスクを座標にかけてthre以上の値のXY座標を取得・平均を計算
         X1 = pred*self.Xmap
         Y1 = pred*self.Ymap
@@ -183,8 +184,8 @@ class PConvUnet(object):
 
         # y_trueの中でthre以上の値の座標を取り出すためのマスクを作成
         true = y_true*self.exist
-        true = tf.nn.relu(true - thre)
-        true = tf.math.sign(true)
+        # true = tf.nn.relu(true - thre)
+        # true = tf.math.sign(true)
         # 上記と同様
         X2 = true*self.Xmap
         Y2 = true*self.Ymap
@@ -219,7 +220,65 @@ class PConvUnet(object):
         d_mu = [tf.squeeze(muX1-muX2,axis=[1,2,3]), tf.squeeze(muY1-muY2,axis=[1,2,3])]
         sq = ((d_mu[0]**2)*cov2[1][1] - 2*d_mu[0]*d_mu[1]*cov2[0][1] + (d_mu[1]**2)*cov2[0][0] )/(det2+1e-10)
 
-        KL = 0.5*(tf.math.log(det2/(det1+1e-10)) + tr21 + sq -dim)
+        KL = 0.5*(tf.math.log(det2/(det1+1e-10)+1e-10) + tr21 + sq -dim)
+
+        deb=[y_true,y_pred, pred,X1,Y1, num1,muX1,muY1,X2,Y2,muX2,muY2,disX1,disY1,disX2,disY2,det1,det2,tr21,d_mu,sq,KL]
+
+        return KL, deb
+
+    # assume gaussian
+    def loss_KL(self,y_true, y_pred,dim=2):
+        thre = self.KLthre
+        # y_predの中でthre以上の値の座標を取り出すためのマスクを作成
+        pred = y_pred*self.exist # shape=[N,512,512,1]
+        # pred = tf.nn.relu(pred - thre)
+        # pred = tf.math.sign(pred)
+        # マスクを座標にかけてthre以上の値のXY座標を取得・平均を計算
+        X1 = pred*self.Xmap
+        Y1 = pred*self.Ymap
+        num1 = tf.reduce_sum(pred) + 10e-6
+        muX1 = tf.reduce_sum(X1,axis=[1,2],keepdims=True)/num1 # shape=[N,1,1,1] 
+        muY1 = tf.reduce_sum(Y1,axis=[1,2],keepdims=True)/num1
+
+        # y_trueの中でthre以上の値の座標を取り出すためのマスクを作成
+        true = y_true*self.exist
+        # true = tf.nn.relu(true - thre)
+        # true = tf.math.sign(true)
+        # 上記と同様
+        X2 = true*self.Xmap
+        Y2 = true*self.Ymap
+        num2 = tf.reduce_sum(true) + 10e-6
+        muX2 = tf.reduce_sum(X2,axis=[1,2],keepdims=True)/num2
+        muY2 = tf.reduce_sum(Y2,axis=[1,2],keepdims=True)/num2
+
+        # 分散共分散行列
+        disX1 = tf.abs((X1-muX1)*pred)
+        disY1 = tf.abs((Y1-muY1)*pred)
+        cov1 = [
+            [tf.reduce_sum(disX1**2,axis=[1,2,3])/num1, tf.reduce_sum(disX1*disY1,axis=[1,2,3])/num1],
+            [tf.reduce_sum(disX1*disY1,axis=[1,2,3])/num1, tf.reduce_sum((disY1**2),axis=[1,2,3])/num1]
+        ]
+
+        disX2 = tf.abs((X2-muX2)*true)
+        disY2 = tf.abs((Y2-muY2)*true)
+        cov2 = [
+            [tf.reduce_sum((disX2**2),axis=[1,2,3])/num2, tf.reduce_sum(disX2*disY2,axis=[1,2,3])/num2],
+            [tf.reduce_sum(disX2*disY2,axis=[1,2,3])/num2, tf.reduce_sum((disY2**2),axis=[1,2,3])/num2]
+        ]
+
+        # 多変量正規分布(2変量)のKL-Divergenceを計算
+        # 第一項 : shape=[N]
+        det1 = calcDet(cov1,dim)
+        det2 = calcDet(cov2,dim)
+
+        # 第二項 : shape=[N]
+        tr21 = (cov1[0][0]*cov2[1][1] - 2*cov1[0][1]*cov2[0][1] + cov1[1][1]*cov2[0][0])/(det2+1e-10)
+
+        # 第三項 : shape=[N]
+        d_mu = [tf.squeeze(muX1-muX2,axis=[1,2,3]), tf.squeeze(muY1-muY2,axis=[1,2,3])]
+        sq = ((d_mu[0]**2)*cov2[1][1] - 2*d_mu[0]*d_mu[1]*cov2[0][1] + (d_mu[1]**2)*cov2[0][0] )/(det2+1e-10)
+
+        KL = 0.5*(tf.math.log(det2/(det1+1e-10)+1e-10) + tr21 + sq -dim)
 
         return KL
 
@@ -237,18 +296,17 @@ class PConvUnet(object):
         return kl
 
     def compSpatialHist(self,x, kSize=64, sSize=4, isNormMode='sum', thre=0.05):
-        # pdb.set_trace()
         # binarize images
-        x_bin = x*self.exist
-        x_bin = tf.nn.relu(x_bin - thre)
-        x_bin = tf.math.sign(x_bin)
+        # x_bin = x*self.exist
+        # x_bin = tf.nn.relu(x_bin - thre)
+        # x_bin = tf.math.sign(x_bin)
 
         # kernel with all ones
         kernel = np.ones([kSize,kSize,1,1])
         kernel = tf.constant(kernel, dtype=tf.float32)
         
         # histogram using conv2d
-        x_conv = tf.nn.conv2d(x_bin,kernel,strides=[1,sSize,sSize,1],padding='VALID')
+        x_conv = tf.nn.conv2d(x,kernel,strides=[1,sSize,sSize,1],padding='VALID')
         shape = tf.shape(x_conv)
         x_conv_flat = tf.reshape(x_conv,[shape[0],shape[1]*shape[2]])
 

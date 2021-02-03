@@ -7,11 +7,13 @@ import pickle
 import glob
 import pdb
 import sys
+import tensorflow as tf
 
 from argparse import ArgumentParser
 from copy import deepcopy
 from tqdm import tqdm
 
+import keras.backend as K
 from keras.preprocessing.image import ImageDataGenerator
 from keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback,Callback
 from keras_tqdm import TQDMCallback
@@ -24,8 +26,6 @@ from matplotlib import pyplot as plt
 from libs.pconv_model import PConvUnet
 from libs.util import MaskGenerator
 from PIL import Image
-
-# Sample call
 
 def cmap(x,sta=[222,222,222],end=[255,0,0]): #x:gray-image([w,h]) , sta,end:[B,G,R]
     vec = np.array(end) - np.array(sta)
@@ -72,7 +72,7 @@ def parse_args():
     parser.add_argument('-histKL','--histKL',action='store_true',help="Flag for using spatial Histogram KL-loss function")
     parser.add_argument('-histFilterSize','--histFilterSize',type=int,default=64,help="size of filter to make a histogram (default=64)" )
     parser.add_argument('-epochs','--epochs',type=int,default=100,help='training epoch')
-    parser.add_argument('-es','--isEarlyStop',action='store_true',help="Flag for using Early stopping")
+    parser.add_argument('-es','--isEarlyStopOn',action='store_true',help="Flag for using Early stopping")
     parser.add_argument('-esEpoch','--earlyStopEpoch',type=int,default=10)
 
     return  parser.parse_args()
@@ -126,6 +126,7 @@ class PSNREarlyStopping(ModelCheckpoint):
         self.history_val_PSNR = []
         self.best_weights   = None
         self.now_epoch = 0
+        self.limitRatio = 0.05
         
         # ロスなどの記録
         if not os.path.isdir(savepath):
@@ -160,33 +161,27 @@ class PSNREarlyStopping(ModelCheckpoint):
 
         # 過学習の検知
         #=================================================================
-        self.epochs_since_last_save += 1
-        val_PSNR = logs['val_PSNR']
-        self.history_val_PSNR.append(val_PSNR)
-        
-        # 検証データのPSNRの最大値を取得
-        if val_PSNR > self.best_val_PSNR:
-            self.best_val_PSNR = val_PSNR
+        if args.isEarlyStopOn:
+            self.epochs_since_last_save += 1
+            val_PSNR = logs['val_PSNR']
+            self.history_val_PSNR.append(val_PSNR)
             
-        # 最大値より 1.5 以上小さいと終了
-        # if self.best_val_PSNR - 1.5 > val_PSNR: 
-        #     self.model.stop_training = True
-        #     self.on_train_end()
-        #     sys.exit()
+            # 検証データのPSNRの最大値を取得
+            if val_PSNR > self.best_val_PSNR:
+                self.best_val_PSNR = val_PSNR
+                
+            # 指定されたエポック(nエポック)以降で、最大値と比べて5%以上下がっているなら終了
+            if (epoch+1) >= args.earlyStopEpoch:
+                # pdb.set_trace()
+                if self.best_val_PSNR*(1-self.limitRatio) > val_PSNR:
+                    # print("best:{}, current:{}".format(self.best_val_PSNR,np.max(self.history_val_PSNR[-5:])))
+                    self.model.stop_training = True
+                    self.on_train_end()
+                    sys.exit()
 
-        # 指定されたエポック(nエポック)以降で、過去5エポック分の最大値と比べて0.5以上下がっているなら終了
-        if (epoch+1) >= args.earlyStopEpoch:
-            # pdb.set_trace()
-            if self.best_val_PSNR - 0.5 > np.max(self.history_val_PSNR[-5:]):
-                # print("best:{}, current:{}".format(self.best_val_PSNR,np.max(self.history_val_PSNR[-5:])))
-                self.model.stop_training = True
-                self.on_train_end()
-                sys.exit()
-
-        # 10回に1回モデルを保存
-        if (epoch+1)%10==0:
-            self._save_model(epoch=epoch, logs=logs)
-
+            # 10回に1回モデルを保存
+            if (epoch+1)%10==0:
+                self._save_model(epoch=epoch, logs=logs)
         #=================================================================
 
 
@@ -314,9 +309,20 @@ if __name__ == '__main__':
 
 
     # Build the model
-    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= args.KL,
-    isUsedHistKL=args.histKL,exist_point_file=SEA_PATH,exist_flag=True,histFSize=args.histFilterSize)
+    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= args.KL,isUsedHistKL=args.histKL,exist_point_file=SEA_PATH,exist_flag=True,histFSize=args.histFilterSize)
     
+
+    # 勾配抽出
+    # traImg = pickle.load(open(TRAIN_PICKLE,"rb"))["images"]
+    # traMask = pickle.load(open(TRAIN_MASK_PICKLE,"rb"))
+    # loss, deb = model.loss_KL_debug(model.inputs_img,model.outputs_img)
+    # get_grad = K.gradients(loss, [model.inputs_img,model.inputs_mask])
+    # get_grad = K.gradients(model.loss_spatialHistKL(model.inputs_img,model.outputs_img), [model.inputs_img,model.inputs_mask])
+    # get_grad = K.gradients(model.loss_valid(model.inputs_mask, model.inputs_img, model.outputs_img), [model.inputs_img,model.inputs_mask])
+    # sess = tf.compat.v1.keras.backend.get_session()
+    # grad_out, deb_out = sess.run([get_grad[0],deb], feed_dict={model.inputs_img: traImg[:2], model.inputs_mask:traMask[:2]})
+    # pdb.set_trace()
+
     # Loading of checkpoint（デフォルトではロードせずに初めから学習する）
     if args.checkpoint:
         if args.stage == 'train':
@@ -326,29 +332,16 @@ if __name__ == '__main__':
 
     # callback の設定
     callbacks = [
-            TensorBoard(
-                log_dir=os.path.join(log_path, dataset+'_model'),
-                write_graph=False
-            ),
-            LambdaCallback( # 学習中のテスト出力が不必要ならこのLambdaCallbackをコメントアウト
-                on_epoch_end=lambda epoch,logs: plot_callback(model, test_path)
-            ),
-            TQDMCallback()
-        ]
-
-    if args.isEarlyStop:# PSNRを監視してアーリーストップ
-        callbacks.append(PSNREarlyStopping(loss_path,log_path,dataset))
-    else:# 通常の学習(数エポックに1回,モデルを保存)
-        callbacks.append(
-            ModelCheckpoint(
-                os.path.join(log_path, dataset+'_model', 'weights.{epoch:02d}.h5'),
-                monitor='val_PSNR', 
-                save_best_only=False, 
-                save_weights_only=True,
-                period = 10
-            )
-        )
-
+        TensorBoard(
+            log_dir=os.path.join(log_path, dataset+'_model'),
+            write_graph=False
+        ),
+        LambdaCallback( # 学習中のテスト出力が不必要ならこのLambdaCallbackをコメントアウト
+            on_epoch_end=lambda epoch,logs: plot_callback(model, test_path)
+        ),
+        PSNREarlyStopping(loss_path,log_path,dataset),
+        TQDMCallback()
+    ]
 
     # モデルの学習
     model.fit_generator(
