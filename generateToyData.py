@@ -22,15 +22,22 @@ def gaussian(x,sigma,mu):
 
 def parse_args():
     parser = ArgumentParser(description='Generate toy data for Inpainting')
+    parser.add_argument('-dspath','--dataSetPath',type=str,default="ToyData",help='Name of dataSet (default=ToyData)')
     parser.add_argument('-loadMask','--loadMaskPath',default="",help='using exist Mask Image, you have to set the path. (default="" (generate new mask))')
+    # parser.add_argument('-loadTrain','--loadTrainPath',default="",help="他データセットの画像をtrainに使用")
+    # parser.add_argument('-loadValid','--loadValidPath',default="",help="他データセットの画像をvalidに使用")
+    # parser.add_argument('-loadTest','--loadTestPath',default="",help="他データセットの画像をtestに使用")
+    # parser.add_argument('-loadSite','--loadSitePath',type=str,default="",help="")
     parser.add_argument('-train', '--train',type=int, default=1500,help='number of training images (default=1500)')
     parser.add_argument('-valid', '--valid',type=int, default=100,help='number of validation images (default=100)')
     parser.add_argument('-test', '--test',type=int, default=100,help='number of test images (default=100)')
     parser.add_argument('-masktype', '--masktype',type=str, default='same', help='generate same mask images or vary mask images (default=same)', choices=['same', 'vary'])
     parser.add_argument('-ratio','--maskratio',type=float,default=0.99,help='ratio of mask (default=0.99)')
-    parser.add_argument('-dspath','--dataSetPath',type=str,default="gaussianToyData",help='Name of dataSet (default=gaussianToyData)')
     parser.add_argument('-posVariant','--positionVariant',action='store_true',help="Flag for making data position variant")
     parser.add_argument('-mixed','--isMixedGaussian',action='store_true',help="Flag for making data mixed-gaussian (if you use this, -posVariant is not available)")
+    parser.add_argument('-noise','--isNoised',action='store_true',help="Flag for using noised data")
+    parser.add_argument('-filter','--filterType',type=str,default="none",help="フィルターのタイプ(none,rect,gaus)")
+    parser.add_argument('-loadFilter','--loadFilterPath',type=str,default="",help='')
 
     return  parser.parse_args()
 
@@ -38,7 +45,9 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    shape = (512,512,1) # 画像のサイズ
+    # shape = (512,512,1) # 画像のサイズ
+    shape = (256,256,1)
+    # shape = (128,128,1)
     keys = ["train","valid","test"]
     dsPath = "data" + os.sep + args.dataSetPath # データセットのパス
     if not os.path.isdir(dsPath):
@@ -46,6 +55,11 @@ if __name__ == "__main__":
 
     dataNum = {keys[0]:args.train,keys[1]:args.valid,keys[2]:args.test} # train,validation,testでの生成数 
     imagePath = [dsPath + os.sep + k + ".pickle" for k in keys]
+
+    if args.loadFilterPath!="":
+        # ext = args.loadFilterPath.split(".")[-1]
+        filt = np.array(Image.open(args.loadFilterPath))/255
+        
 
     # 指定されたマスク画像およびマスク画像のpickleデータをロードする
     if args.loadMaskPath!="":
@@ -57,6 +71,8 @@ if __name__ == "__main__":
 
         # reshape
         print("Given mask image is reshaped.")
+        if existMask.shape[0]!=shape[0] or existMask.shape[1]!=shape[1]:
+            existMask = cv2.threshold(cv2.resize(existMask*255,(shape[0],shape[1])),127,255,cv2.THRESH_BINARY)[1]/255
         existMask = np.reshape(existMask,shape)
 
 
@@ -66,9 +82,15 @@ if __name__ == "__main__":
         sys.exit()
 
     if args.isMixedGaussian:
-        pointNum = [2,3] # ガウス分布の数 ([2,3]なら2~3個のガウス分布による混合ガウスになる)
+        pointNum = [3,4] # ガウス分布の数 ([2,3]なら2~3個のガウス分布による混合ガウスになる)
     else:
         pointNum = [1,1]
+
+    if args.filterType=="rect":
+        filt = np.ones(shape)
+        filt[100:340,80:200,0] = 0
+    elif args.filterType=="gaus":
+        pass
 
     #================================================================================================
     # マスク画像の作成
@@ -117,8 +139,9 @@ if __name__ == "__main__":
                 for p in obs:
                     mask[p[0],p[1]] = 1
                 masks.append(mask.astype("uint8"))
-
-        pickle.dump(np.array(masks),open(path,"wb"))
+            
+        masks = np.array(masks)
+        pickle.dump(masks,open(path,"wb"))
         print("")
 
     #=============================================================
@@ -129,36 +152,36 @@ if __name__ == "__main__":
     X, Y = np.meshgrid(x, y)
     XY = np.c_[X.ravel(),Y.ravel()]
 
-    def sample_mu_sigma(): # 平均と分散のランダムサンプリング
-        range_shape = np.array([shape[0],shape[1]])
-        mu = np.random.rand(2)*range_shape
+    range_shape = np.array([shape[0],shape[1]])
+
+    def sample_mu_sigma(mu): # 平均と分散のランダムサンプリング
+        # mu = np.random.rand(2)*range_shape
 
         if args.positionVariant:
+            delRange = [-25,25] # 作らない範囲（縦方向）
             centered_mu = mu-range_shape/2
-            if centered_mu[0]>0 and centered_mu[1]>0:
+
+            # if (centered_mu[1] < delRange[1]) and (centered_mu[1] > delRange[-1]):
+            #     mu = [mu[0], range_shape[1]/2]
+            #     if centered_mu[1] > 0: # 正なら範囲以上に
+            #         mu[1] += 30 + np.random.rand()*60
+            #     else: # 負なら範囲以下に
+            #         mu[1] -= 30 + np.random.rand()*60
+
+            if centered_mu[1]>0:
                 xy = 0
-                xx = 6000
-                yy = 6000
+                xx = 1800
+                yy = 850
                 label = 1
-            elif centered_mu[0]>0 and centered_mu[1]<0:
+            elif centered_mu[1]<=0:
                 xy = 0
-                xx = 1500
-                yy = 1500
+                xx = 850
+                yy = 850
                 label = 2
-            elif centered_mu[0]<0 and centered_mu[1]<0:
-                sign = 1 if random.random() < 0.5 else -1
-                xy = sign*1000
-                xx = 1500
-                yy = 1500
-                label = 3
-            elif centered_mu[0]<0 and centered_mu[1]>0:
-                sign = 1 if random.random() < 0.5 else -1
-                xy = sign*2000
-                xx = 4000
-                yy = 4000
-                label = 4
+            
         else:
-            randRange = [2000,10000]
+            # randRange = [2000,10000]
+            randRange = [500,1500]
             dis = randRange[1]-randRange[0]
             xx = random.random()*dis+randRange[0]
             yy = random.random()*dis+randRange[0]
@@ -172,24 +195,45 @@ if __name__ == "__main__":
     for path,key in zip(imagePath,keys):
         imgs = []
         labels = []
+        filters = []
         print("generate "+key+" data")
         for i in range(dataNum[key]):
             print("\r progress:{0}/{1}".format(i+1,dataNum[key]),end="")
             Z = np.zeros(shape)
+            
+            # mu = np.random.rand(2)*range_shape
+            # mu = [np.random.rand()*50+105,np.random.rand()*256]
+            mu = [128,np.random.rand()*256]
 
             labs = ""
             for _ in range(random.randint(pointNum[0],pointNum[1])):
                 # ランダムにサンプリング
-                rand_mu, rand_sigma,label = sample_mu_sigma()
+                rand_mu, rand_sigma,label = sample_mu_sigma(mu)
                 # 生成
                 Z += gaussian(XY,rand_sigma,rand_mu).reshape(shape)
                 labs += str(label)
 
+            # ラベルの保存
             labels.append(labs)
 
             weight = random.random()*128 + 127 # max:127 ~ 255
             img = (Z/np.max(Z)) * weight / 255 # max:0.5 ~ 1
+
+            if args.isNoised:
+                img += np.random.rand(shape[0],shape[1],shape[2])-0.5
+                img[img < 0] = 0
+                img[img > 1] = 1
+
+            if args.filterType!="none" or args.loadFilterPath != "":
+                pass
+                # img = img + filt[:,:,np.newaxis]
+                # img[img > 1] = 1
+                # filters.append(filt)
+                # savefig = img*filt*255
+                # cv2.imwrite("data/sample_filterToyData/{0:04d}.png".format(i),img[:,:,0]*255)
+
             imgs.append(img)
-        dumpData = {"images":np.array(imgs),"labels":labels}
+
+        dumpData = {"images":np.array(imgs),"labels":labels,"filters":np.array(filters)}
         pickle.dump(dumpData,open(path,"wb"))
         print("")

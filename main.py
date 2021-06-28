@@ -23,7 +23,7 @@ import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
-from libs.pconv_model import PConvUnet
+from libs.pconv_model import PConvUnet,sitePConvUnet,PKConvUnet
 from libs.util import MaskGenerator
 from PIL import Image
 
@@ -55,6 +55,17 @@ def calcPCV1(x): # 第一主成分ベクトルを導出し
     line = np.concatenate([vec*-(img_h/2),vec*img_h/2],axis=1) + center
     return center,line
 
+def resize_images(xs,size): # xs=[N,W,H,C]
+    res = []
+    for x in xs:
+        chanXs = []
+        for i in range(x.shape[2]):
+            chanXs.append(cv2.resize(x[:,:,i],size)[:,:,np.newaxis])
+        chanXs = np.concatenate(chanXs,axis=2)
+        res.append(chanXs)
+
+    return np.array(res)
+
 def parse_args():
     parser = ArgumentParser(description='Training script for PConv inpainting')
     parser.add_argument('experiment',type=str,help='name of experiment, e.g. \'normal_PConv\'')
@@ -67,58 +78,77 @@ def parse_args():
     parser.add_argument('-validmask', '--validmask', type=str, default="", help='Folder with validation mask images')
     parser.add_argument( '-testmask', '--testmask', type=str, default="", help='Folder with testing mask images')
     parser.add_argument('-checkpoint', '--checkpoint',type=str, help='Previous weights to be loaded onto model')
-    parser.add_argument('-KLthre', '--KLthre',type=float, default=0.4,help='threshold value of KLloss')
-    parser.add_argument('-KL','--KL',action='store_true',help="Flag for using KL-loss function")
-    parser.add_argument('-histKL','--histKL',action='store_true',help="Flag for using spatial Histogram KL-loss function")
-    parser.add_argument('-histFilterSize','--histFilterSize',type=int,default=64,help="size of filter to make a histogram (default=64)" )
     parser.add_argument('-epochs','--epochs',type=int,default=100,help='training epoch')
+    parser.add_argument('-imgw','--imgw',type=int,default=512,help='input width')
+    parser.add_argument('-imgh','--imgh',type=int,default=512,help='input height')
+
+    # EarlyStopping
     parser.add_argument('-es','--isEarlyStopOn',action='store_true',help="Flag for using Early stopping")
     parser.add_argument('-esEpoch','--earlyStopEpoch',type=int,default=10)
+    # 対数尤度
+    parser.add_argument('-llh','--LLH',action='store_true')
+    parser.add_argument('-llhonly','--LLHonly',action='store_true')
+    # KL
+    parser.add_argument('-t1','--truefirst',action='store_true',help="KL距離において真値を第一引数にするかどうか")
+    parser.add_argument('-p1','--predfirst',action='store_true',help="KL距離において予測値を第一引数にするかどうか")
+    parser.add_argument('-klbias','--KLbias',action='store_true',help="KL-divergenceを用いる際、真値と予測値が同じ時に勾配が０になるためのバイアス")
+    parser.add_argument('-klonly','--KLonly',action='store_true',help="KL「のみ」を損失として使用する")
+    parser.add_argument('-KLthre', '--KLthre',type=float, default=0.0,help='threshold value of KLloss ※使用しない') # 使用しない
+    parser.add_argument('-KL','--KL',action='store_true',help="Flag for using KL-loss function")
+    # histogram KL
+    parser.add_argument('-histKL','--histKL',action='store_true',help="Flag for using spatial Histogram KL-loss function")
+    parser.add_argument('-histFilterSize','--histFilterSize',type=int,default=64,help="size of filter to make a histogram (default=64)" )
+
+    # 学習途中でテストのプロットをするかどうか
+    parser.add_argument('-plotTest','--plotTest',action='store_true')
+    # サイト特性を考慮したモデルを使用するかどうか
+    parser.add_argument('-pchan','--posEmbChan',type=int,default=1,help='channnels of position code (learnable)')
+    parser.add_argument('-sitePConv','--sitePConv',action='store_true')
+    parser.add_argument('-posKernel','--positionalKernel',action='store_true')
+    parser.add_argument('-posKernelOpe','--posKernelOpe',type=str,default="add")
+    parser.add_argument('-PKlayers','--PKlayers',type=lambda x:list(map(int,x.split(","))),default=[3],help="list of PKConvlayer number. ex:3,4,5")
+    parser.add_argument('-loadSite','--loadSitePath',type=lambda x:list(map(str,x.split(","))),default="")
 
     return  parser.parse_args()
 
-# ディレクトリから画像を読み込み学習に使用する為のクラス（マスクの変形なども可能）
-class AugmentingDataGenerator(ImageDataGenerator):
-    """Wrapper for ImageDataGenerator to return mask & image"""
-    def flow_from_directory(self, directory, mask_generator, *args, **kwargs):
-        generator = super().flow_from_directory(directory, class_mode=None, color_mode='grayscale', *args, **kwargs) 
-        seed = None if 'seed' not in kwargs else kwargs['seed']
-        while True:
-            # Get augmentend image samples
-            ori = next(generator)
-            
-            # Get masks for each image sample            
-            mask = np.stack([
-                mask_generator.sample(seed)
-                for _ in range(ori.shape[0])], axis=0
-            )[:,:,:,np.newaxis]
 
-            # Apply masks to all image sample
-            masked = deepcopy(ori)
-            masked[mask==0] = 0
-            gc.collect()
-            yield [masked, mask], ori
-
-def Generator(imagePath, maskPath, batchSize):
+# paths = [Image And Site, mask]
+def Generator(paths, batchSize):
+    imagePath = paths[0]
+    maskPath = paths[1]
     data = pickle.load(open(imagePath,"rb"))
     mask = pickle.load(open(maskPath,"rb"))
 
     while True:
         for B in range(0, len(data), batchSize):
             ori = data["images"][B:B+batchSize] # original images
+
             # Y = data["labels"][B:B+batchSize] # labels
             mask = mask[B:B+batchSize] # masks
             masked = mask*ori # masked image
-            yield [masked, mask], ori # Returning mask
 
+            # pdb.set_trace()
+            if useSite:
+                # pdb.set_trace()
+                devide = 2**(args.PKlayers[0]-1)
+                layer_shape = tuple([int(s/devide) for s in shape])
+                site = np.tile(posEmb,[batchSize,1,1,1])
+                site = resize_images(site,layer_shape) #TODO:自動でサイズを決めるように
+                inp = (masked, mask, site)
+            else:
+                inp = (masked, mask)
+
+            out = ori
+
+            yield inp, out
 
 class PSNREarlyStopping(ModelCheckpoint):
 
     def __init__(self,savepath,log_path,dataset):
         super(PSNREarlyStopping,self).__init__(
             os.path.join(log_path, dataset+'_model', 'weights.{epoch:02d}.h5'),
-            monitor='val_PSNR', 
-            save_best_only=False, 
+            monitor='val_PSNR',
+            save_best_only=False,
             save_weights_only=True,
             period = 1
         )
@@ -127,33 +157,27 @@ class PSNREarlyStopping(ModelCheckpoint):
         self.best_weights   = None
         self.now_epoch = 0
         self.limitRatio = 0.05
-        
+
         # ロスなどの記録
         if not os.path.isdir(savepath):
             os.makedirs(savepath)
         self.path = os.path.join(savepath,"training_losses.pickle")
-        self.types = ["loss","PSNR","loss_KL","loss_spatialHistKL"]    
+        self.types = ["loss","PSNR","loss_KL","original","loss_Djs"]
+        # self.types = ["output_img_"+t for t in self.types]
         # training用
-        self.trainingLoss = {
-            self.types[0]:[],
-            self.types[1]:[],
-            self.types[2]:[],
-            self.types[3]:[]
-        }
+        self.trainingLoss = dict([(t,[]) for t in self.types])
         # validation用
-        self.validationLoss = {
-            self.types[0]:[],
-            self.types[1]:[],
-            self.types[2]:[],
-            self.types[3]:[]
-        }
+        self.validationLoss = dict([(t,[]) for t in self.types])
 
     def on_train_batch_end(self, batch, logs={}): # バッチ終了時に呼び出される
+        # pdb.set_trace()
         # 訓練時のロスの保存
         for t in self.types:
             self.trainingLoss[t].append(logs.get(t))
 
     def on_epoch_end(self, epoch, logs=None):
+        print("epoch{}".format(epoch))
+        self.saveModelPath = self._get_file_path(epoch, logs)
         self.now_epoch += 1
         # 検証時のロスの保存
         for t in self.types:
@@ -178,15 +202,17 @@ class PSNREarlyStopping(ModelCheckpoint):
                     self.model.stop_training = True
                     self.on_train_end()
                     sys.exit()
-
-            # 10回に1回モデルを保存
-            if (epoch+1)%10==0:
-                self._save_model(epoch=epoch, logs=logs)
         #=================================================================
 
+        # 10回に1回モデルを保存
+        if (epoch+1)%10==0:
+            # pdb.set_trace()
+            # self._save_model(epoch=epoch, logs=logs)
+            self.model.save_weights(self.saveModelPath, overwrite=True, options=self._options)
 
     def on_train_end(self,logs=None):
-        self._save_model(epoch=self.now_epoch, logs=logs)
+        # self._save_model(epoch=epoch, logs=logs)
+        self.model.save_weights(self.saveModelPath, overwrite=True, options=self._options)
 
         summary = {
             "epochs":epochs,
@@ -229,9 +255,10 @@ if __name__ == '__main__':
 
     # 実験に用いるディレクトリを作成
     experiment_path = ".{0}experiment{0}{1}_logs".format(os.sep,args.experiment)
-    loss_path = "{0}{1}losses".format(experiment_path,os.sep)
-    log_path = "{0}{1}logs".format(experiment_path,os.sep)
-    test_path = "{0}{1}test_samples".format(experiment_path,os.sep)
+    loss_path = f"{experiment_path}{os.sep}losses"
+    log_path = f"{experiment_path}{os.sep}logs"
+    test_path = f"{experiment_path}{os.sep}test_samples"
+    site_path = f"data{os.sep}siteImages{os.sep}"
     for DIR in [experiment_path,loss_path,log_path,test_path]:
         if not os.path.isdir(DIR):
             os.makedirs(DIR)
@@ -240,6 +267,7 @@ if __name__ == '__main__':
     dataset = args.dataset # データセットのディレクトリ
     dspath = ".{0}data{0}{1}{0}".format(os.sep,dataset)
 
+    # 各pickleデータのパス
     TRAIN_PICKLE = dspath+"train.pickle" if args.train=="" else args.train
     TRAIN_MASK_PICKLE = dspath+"train_mask.pickle" if args.trainmask=="" else args.trainmask
     VALID_PICKLE = dspath+"valid.pickle" if args.validation=="" else args.valid
@@ -247,81 +275,106 @@ if __name__ == '__main__':
     TEST_PICKLE = dspath+"test.pickle" if args.test=="" else args.test
     TEST_MASK_PICKLE = dspath+"test_mask.pickle" if args.testmask=="" else args.testmask
 
+    # 地震データの時は海洋部のマスクをロード
     if "quake" in dataset:
         SEA_PATH = ".{0}data{0}sea.png".format(os.sep)
     else:
         SEA_PATH = ""
+
+    useSite = False
+    # 位置エンベッディング画像のロード
+    if args.loadSitePath[0]!="":
+        useSite = True
+        if len(args.loadSitePath)>1:
+            posEmb = [np.array(Image.open(f"{site_path}{p}"))[:,:,np.newaxis] for p in args.loadSitePath]
+            posEmb = np.concatenate(posEmb,axis=2)[np.newaxis,:,:,:] # [1,H,W,C]
+        else:
+            posEmb = np.array(Image.open(f"{site_path}{args.loadSitePath[0]}"))/255
+            posEmb = posEmb[np.newaxis,:,:,np.newaxis] # [1,H,W,C]
+
+        args.posEmbChan = posEmb.shape[3]
+
+
     train_Num = pickle.load(open(TRAIN_PICKLE,"rb"))["images"].shape[0] # 画像の枚数をカウント
     valid_Num = pickle.load(open(VALID_PICKLE,"rb"))["images"].shape[0]
-    img_w = 512
-    img_h = 512
+    img_w = args.imgw
+    img_h = args.imgh
     shape = (img_h, img_w)
 
     # バッチサイズはメモリサイズに合わせて調整が必要
     batchsize = 5 # バッチサイズ
     steps_per_epoch = train_Num//batchsize # 1エポック内のiteration数
 
-    train_generator = Generator(TRAIN_PICKLE,TRAIN_MASK_PICKLE,batchsize) # Create training generator
-    val_generator = Generator(VALID_PICKLE,VALID_MASK_PICKLE,batchsize) # Create validation generator
-    test_generator = Generator(TEST_PICKLE,TEST_MASK_PICKLE,batchsize) # Create testing generator
+    # generatorを作成
+    trainPaths = [TRAIN_PICKLE,TRAIN_MASK_PICKLE]
+    validPaths = [VALID_PICKLE,VALID_MASK_PICKLE]
+    testPaths = [TEST_PICKLE,TEST_MASK_PICKLE]
+    train_generator = Generator(trainPaths,batchsize) # Create training generator
+    val_generator = Generator(validPaths,batchsize) # Create validation generator
+    test_generator = Generator(testPaths,batchsize) # Create testing generator
 
     # Pick out an example to be send to test samples folder
     test_data = next(test_generator)
-    (masked, mask), ori = test_data
+
+    if useSite:
+        (masked, mask, site), ori = test_data
+    else:
+        (masked, mask), ori = test_data
+
     mask_rgb = np.tile(np.reshape(mask[0],[shape[0],shape[1],1]),(1,1,3)) #カラーで可視化する際に用いるマスク
 
     # 学習途中のテスト結果が必要ない場合はmodel.fit_generator内で
     # 以下の plot_callback() を呼び出している行のコメントアウトをして下さい
-    def plot_callback(model, path):
+    def plot_callback(model, path, epoch):
         """Called at the end of each epoch, displaying our previous test images,
         as well as their masked predictions and saving them to disk"""
         
-        # Get samples & Display them        
-        pred_img = model.predict([masked, mask])
-        pred_time = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+        # Get samples & Display them
+        if useSite:
+            pred_img = model.predict([masked, mask, site])
+        else:
+            pred_img = model.predict([masked, mask])
 
         # Clear current output and display test images
-        for i in range(ori.shape[0]):
+        for i in range(1):
             img = ori[i,:,:,0]
             pred = pred_img[i,:,:,0]
 
             masked_img = cmap(img)
             masked_img[mask_rgb==0] = 255 # 
             titles = ['Masked','Predicted','Original']
-            colors = ['g','b','r']
+            # colors = ['g','b','r']
             xs = [masked_img,cmap(pred),cmap(img)]
-            pcv = [calcPCV1(masked[i,:,:,0]),calcPCV1(pred),calcPCV1(img)]
+            # pcv = [calcPCV1(masked[i,:,:,0]),calcPCV1(pred),calcPCV1(img)]
 
             _, axes = plt.subplots(1, 3, figsize=(20, 5))
 
             for i,x in enumerate(xs):
                 axes[i].imshow(x)
                 axes[i].set_title(titles[i])
-                line = pcv[i][1]
-                ce = pcv[i][0]
-                axes[i].plot(line[1],line[0],colors[i]+'-')
-                axes[i].scatter(ce[1],ce[0],c=colors[i])
-                axes[i].set_xlim(0,img_w-1)
-                axes[i].set_ylim(img_h-1,0)
+                # line = pcv[i][1]
+                # ce = pcv[i][0]
+                # axes[i].plot(line[1],line[0],colors[i]+'-')
+                # axes[i].scatter(ce[1],ce[0],c=colors[i])
+                # axes[i].set_xlim(0,img_w-1)
+                # axes[i].set_ylim(img_h-1,0)
 
-            plt.savefig(os.path.join(path, 'img_{}_{}.png'.format(i, pred_time)))
+            plt.savefig(os.path.join(path, 'img{}_epoch{}.png'.format(i, epoch)))
             plt.close()
 
-
-    # Build the model
-    model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= args.KL,isUsedHistKL=args.histKL,exist_point_file=SEA_PATH,exist_flag=True,histFSize=args.histFilterSize)
-    
-
-    # 勾配抽出
-    # traImg = pickle.load(open(TRAIN_PICKLE,"rb"))["images"]
-    # traMask = pickle.load(open(TRAIN_MASK_PICKLE,"rb"))
-    # loss, deb = model.loss_KL_debug(model.inputs_img,model.outputs_img)
-    # get_grad = K.gradients(loss, [model.inputs_img,model.inputs_mask])
-    # get_grad = K.gradients(model.loss_spatialHistKL(model.inputs_img,model.outputs_img), [model.inputs_img,model.inputs_mask])
-    # get_grad = K.gradients(model.loss_valid(model.inputs_mask, model.inputs_img, model.outputs_img), [model.inputs_img,model.inputs_mask])
-    # sess = tf.compat.v1.keras.backend.get_session()
-    # grad_out, deb_out = sess.run([get_grad[0],deb], feed_dict={model.inputs_img: traImg[:2], model.inputs_mask:traMask[:2]})
     # pdb.set_trace()
+    # Build the model
+    if args.positionalKernel:
+        model = PKConvUnet(img_rows=img_h,img_cols=img_w,use_site=useSite,exist_point_file=SEA_PATH,
+        exist_flag=True,posEmbChan=args.posEmbChan,opeType=args.posKernelOpe,PKConvlayer=args.PKlayers)
+    elif args.sitePConv:
+        model = sitePConvUnet(img_rows=img_h,img_cols=img_w,use_site=useSite,exist_point_file=SEA_PATH,
+        exist_flag=True,posEmbChan=args.posEmbChan)
+    else:
+        model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= args.KL,
+        isUsedHistKL=args.histKL,isUsedLLH=args.LLH,LLHonly=args.LLHonly,exist_point_file=SEA_PATH,exist_flag=True,
+        histFSize=args.histFilterSize,truefirst=args.truefirst,predfirst=args.predfirst,KLbias=args.KLbias,KLonly=args.KLonly)   
+
 
     # Loading of checkpoint（デフォルトではロードせずに初めから学習する）
     if args.checkpoint:
@@ -336,16 +389,20 @@ if __name__ == '__main__':
             log_dir=os.path.join(log_path, dataset+'_model'),
             write_graph=False
         ),
-        LambdaCallback( # 学習中のテスト出力が不必要ならこのLambdaCallbackをコメントアウト
-            on_epoch_end=lambda epoch,logs: plot_callback(model, test_path)
-        ),
         PSNREarlyStopping(loss_path,log_path,dataset),
         TQDMCallback()
     ]
 
+    # 学習時にテスト結果をプロットするかどうか
+    if args.plotTest:
+        callbacks.append(
+            LambdaCallback(on_epoch_end=lambda epoch,logs: plot_callback(model, test_path,epoch))
+        )
+
+
     # モデルの学習
     model.fit_generator(
-        train_generator, 
+        train_generator,
         steps_per_epoch=steps_per_epoch,
         validation_data=val_generator,
         validation_steps=valid_Num,
@@ -353,4 +410,4 @@ if __name__ == '__main__':
         verbose=0,
         callbacks=callbacks
     )
-        
+
