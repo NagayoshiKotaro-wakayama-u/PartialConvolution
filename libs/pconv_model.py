@@ -696,7 +696,7 @@ class sitePConvUnet(object):
 class PKConvUnet(object):
 
     def __init__(self, img_rows=512, img_cols=512, use_site=True, inference_only=False, net_name='default', gpus=1,
-     exist_point_file="", exist_flag=False, posEmbChan=1,opeType="add",PKConvlayer=[3,4,5]):
+     exist_point_file="", exist_flag=False, posEmbChan=1,opeType="add",PKConvlayer=[3,4,5],encFNum=[64,128,256,512,512],eachChannel=False):
         # Settings
         self.img_rows = img_rows
         self.img_cols = img_cols
@@ -720,10 +720,6 @@ class PKConvUnet(object):
         self.exist = K.constant(exist_img)
         self.obsNum = np.sum(exist_img)
 
-        # Assertions
-        # assert self.img_rows >= 256, 'Height must be >256 pixels'
-        # assert self.img_cols >= 256, 'Width must be >256 pixels'
-
         # Set current epoch
         self.current_epoch = 0
 
@@ -732,8 +728,10 @@ class PKConvUnet(object):
         self.inputs_img = Input((self.img_rows, self.img_cols, 1), name='inputs_img')
         self.inputs_mask = Input((self.img_rows, self.img_cols, 1), name='inputs_mask')
 
-        if use_site:# サイト特性を用いるかどうか
-            devide = 2**self.firstLayer
+
+        if use_site:# 位置特性を初めの入力に用いているかどうか
+            # pdb.set_trace()
+            devide = 2**(self.firstLayer-1)
             site_row = int(self.img_rows/devide)
             site_col = int(self.img_cols/devide)
             self.inputs_site = Input((site_row, site_col, posEmbChan), name='inputs_site')
@@ -741,21 +739,35 @@ class PKConvUnet(object):
         else:
             self.inputs = [self.inputs_img, self.inputs_mask]
 
-        # decide model
-        keyArgs = {"posEmbChan":posEmbChan, "use_site":use_site, "opeType":self.opeType}
-        self.encoder1 = PKEncoder(64,7, 1, **keyArgs) if (1 in PKConvlayer) else Encoder(64, 7, 1, bn=False)
-        self.encoder2 = PKEncoder(128,5, 2, **keyArgs) if (2 in PKConvlayer) else Encoder(128,5, 2)
-        self.encoder3 = PKEncoder(256,5, 3, **keyArgs) if (3 in PKConvlayer) else Encoder(256,5,3)
-        self.encoder4 = PKEncoder(512,3, 4, **keyArgs) if (4 in PKConvlayer) else Encoder(512,3,4)
-        self.encoder5 = PKEncoder(512,3, 5, **keyArgs) if (5 in PKConvlayer) else Encoder(512,3,5)
+        ## decide model===========================================================
+        # Args
+        keyArgs = {"posEmbChan":posEmbChan, "use_site":use_site, "opeType":self.opeType, "eachChannel":eachChannel}
+        Args = [
+            # [フィルター数,フィルターサイズ,番号]
+            [encFNum[0],7, 1],
+            [encFNum[1],5, 2],
+            [encFNum[2],5, 3],
+            [encFNum[3],3, 4],
+            [encFNum[4],3, 5]
+        ]
+        self.PKKey = ["site_in" if (i+1 in PKConvlayer) else None for i in range(len(encFNum))]
 
-        self.decoder6 = Decoder(512, 3)
-        self.decoder7 = Decoder(256,3)
-        self.decoder8 = Decoder(128,3)
-        self.decoder9 = Decoder(64,3)
+        # model
+        self.encoder1 = PKEncoder(*Args[0], **keyArgs) if (1 in PKConvlayer) else Encoder(*Args[0], bn=False)
+        self.encoder2 = PKEncoder(*Args[1], **keyArgs) if (2 in PKConvlayer) else Encoder(*Args[1])
+        self.encoder3 = PKEncoder(*Args[2], **keyArgs) if (3 in PKConvlayer) else Encoder(*Args[2])
+        self.encoder4 = PKEncoder(*Args[3], **keyArgs) if (4 in PKConvlayer) else Encoder(*Args[3])
+        self.encoder5 = PKEncoder(*Args[4], **keyArgs) if (5 in PKConvlayer) else Encoder(*Args[4])
+
+        self.decoder6 = Decoder(encFNum[3], 3)
+        self.decoder7 = Decoder(encFNum[2],3)
+        self.decoder8 = Decoder(encFNum[1],3)
+        self.decoder9 = Decoder(encFNum[0],3)
         self.decoder10 = Decoder(3,3,bn=False)
         self.conv2d = Conv2D(1,1,activation='sigmoid',name='output_img')
-        #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        ## =======================================================================
+
+
         self.ones33 = K.ones(shape=(3, 3, 1, 1))
 
         # Create UNet-like model
@@ -770,24 +782,28 @@ class PKConvUnet(object):
             self.compile_pconv_unet(self.model, self.inputs_mask)
 
     def build_pconv_unet(self, train_bn=True):
-
-        # pdb.set_trace()
         self.encodeCnt = 0
         def siteExtract(outs):
+            # key(site_inがあるかどうか)がNoneであるかを見て、KeyArgsを返す
+            key = self.PKKey[self.encodeCnt]
             self.encodeCnt += 1
-
-            if self.firstLayer==self.encodeCnt:
-                # サイト特性を入力する初めの層にはinputsから入力
-                # 使わない場合は何も与えない(None)
-                return outs[2] if len(self.inputs)==3 else None
+            # pdb.set_trace()
+            if key==None:
+                return {}
+            elif self.encodeCnt==self.firstLayer and self.use_site:
+                # サイト特性を使用する初レイヤーは入力から参照
+                siteValue = self.inputs[2]
             else:
-                return outs[2] if len(outs)==3 else None
+                siteValue = outs[2] if len(outs)==3 else None
+            
+            return {key:siteValue}
 
-        e1 = self.encoder1(self.inputs[0],self.inputs[1],site_in=siteExtract(self.inputs))
-        e2 = self.encoder2(*e1[:2],site_in=siteExtract(e1))
-        e3 = self.encoder3(*e2[:2],site_in=siteExtract(e2))
-        e4 = self.encoder4(*e3[:2],site_in=siteExtract(e3))
-        e5 = self.encoder5(*e4[:2],site_in=siteExtract(e4))
+        # pdb.set_trace()
+        e1 = self.encoder1(self.inputs[0],self.inputs[1],**siteExtract(self.inputs))
+        e2 = self.encoder2(*e1[:2],**siteExtract(e1))
+        e3 = self.encoder3(*e2[:2],**siteExtract(e2))
+        e4 = self.encoder4(*e3[:2],**siteExtract(e3))
+        e5 = self.encoder5(*e4[:2],**siteExtract(e4))
 
         d_conv6, d_mask6 = self.decoder6(e5[0], e5[1], e4[0], e4[1])
         d_conv7, d_mask7 = self.decoder7(d_conv6, d_mask6, e3[0], e3[1])

@@ -24,7 +24,7 @@ matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
 from libs.pconv_model import PConvUnet,sitePConvUnet,PKConvUnet
-from libs.util import MaskGenerator
+from libs.util import MaskGenerator,resize_images
 from PIL import Image
 
 def cmap(x,sta=[222,222,222],end=[255,0,0]): #x:gray-image([w,h]) , sta,end:[B,G,R]
@@ -55,16 +55,16 @@ def calcPCV1(x): # 第一主成分ベクトルを導出し
     line = np.concatenate([vec*-(img_h/2),vec*img_h/2],axis=1) + center
     return center,line
 
-def resize_images(xs,size): # xs=[N,W,H,C]
-    res = []
-    for x in xs:
-        chanXs = []
-        for i in range(x.shape[2]):
-            chanXs.append(cv2.resize(x[:,:,i],size)[:,:,np.newaxis])
-        chanXs = np.concatenate(chanXs,axis=2)
-        res.append(chanXs)
+# def resize_images(xs,size): # xs=[N,W,H,C]
+#     res = []
+#     for x in xs:
+#         chanXs = []
+#         for i in range(x.shape[2]):
+#             chanXs.append(cv2.resize(x[:,:,i],size)[:,:,np.newaxis])
+#         chanXs = np.concatenate(chanXs,axis=2)
+#         res.append(chanXs)
 
-    return np.array(res)
+#     return np.array(res)
 
 def parse_args():
     parser = ArgumentParser(description='Training script for PConv inpainting')
@@ -105,9 +105,15 @@ def parse_args():
     parser.add_argument('-pchan','--posEmbChan',type=int,default=1,help='channnels of position code (learnable)')
     parser.add_argument('-sitePConv','--sitePConv',action='store_true')
     parser.add_argument('-posKernel','--positionalKernel',action='store_true')
+    parser.add_argument('-eachChannel','--eachChannel',action='store_true')
     parser.add_argument('-posKernelOpe','--posKernelOpe',type=str,default="add")
     parser.add_argument('-PKlayers','--PKlayers',type=lambda x:list(map(int,x.split(","))),default=[3],help="list of PKConvlayer number. ex:3,4,5")
     parser.add_argument('-loadSite','--loadSitePath',type=lambda x:list(map(str,x.split(","))),default="")
+    parser.add_argument('-encFNum','--encFNum',type=lambda x:list(map(int,x.split(","))),default="64,128,256,512,512")
+    
+    parser.add_argument('-sScale','--siteScale',type=float,default=1/2550)
+    parser.add_argument('-sBias','--siteBias',type=float,default=0)
+
 
     return  parser.parse_args()
 
@@ -133,7 +139,7 @@ def Generator(paths, batchSize):
                 devide = 2**(args.PKlayers[0]-1)
                 layer_shape = tuple([int(s/devide) for s in shape])
                 site = np.tile(posEmb,[batchSize,1,1,1])
-                site = resize_images(site,layer_shape) #TODO:自動でサイズを決めるように
+                site = resize_images(site,layer_shape)
                 inp = (masked, mask, site)
             else:
                 inp = (masked, mask)
@@ -258,7 +264,9 @@ if __name__ == '__main__':
     loss_path = f"{experiment_path}{os.sep}losses"
     log_path = f"{experiment_path}{os.sep}logs"
     test_path = f"{experiment_path}{os.sep}test_samples"
-    site_path = f"data{os.sep}siteImages{os.sep}"
+    # site_path = f"data{os.sep}siteImages{os.sep}"
+    site_path = f"data{os.sep}new_siteImages{os.sep}"
+
     for DIR in [experiment_path,loss_path,log_path,test_path]:
         if not os.path.isdir(DIR):
             os.makedirs(DIR)
@@ -282,16 +290,19 @@ if __name__ == '__main__':
         SEA_PATH = ""
 
     useSite = False
+    # pdb.set_trace()
     # 位置エンベッディング画像のロード
     if args.loadSitePath[0]!="":
         useSite = True
         if len(args.loadSitePath)>1:
+            # pdb.set_trace()
             posEmb = [np.array(Image.open(f"{site_path}{p}"))[:,:,np.newaxis] for p in args.loadSitePath]
             posEmb = np.concatenate(posEmb,axis=2)[np.newaxis,:,:,:] # [1,H,W,C]
         else:
-            posEmb = np.array(Image.open(f"{site_path}{args.loadSitePath[0]}"))/255
+            posEmb = np.array(Image.open(f"{site_path}{args.loadSitePath[0]}"))
             posEmb = posEmb[np.newaxis,:,:,np.newaxis] # [1,H,W,C]
 
+        posEmb = posEmb*args.siteScale + args.siteBias
         args.posEmbChan = posEmb.shape[3]
 
 
@@ -366,7 +377,7 @@ if __name__ == '__main__':
     # Build the model
     if args.positionalKernel:
         model = PKConvUnet(img_rows=img_h,img_cols=img_w,use_site=useSite,exist_point_file=SEA_PATH,
-        exist_flag=True,posEmbChan=args.posEmbChan,opeType=args.posKernelOpe,PKConvlayer=args.PKlayers)
+        exist_flag=True,posEmbChan=args.posEmbChan,opeType=args.posKernelOpe,PKConvlayer=args.PKlayers,encFNum=args.encFNum,eachChannel=args.eachChannel)
     elif args.sitePConv:
         model = sitePConvUnet(img_rows=img_h,img_cols=img_w,use_site=useSite,exist_point_file=SEA_PATH,
         exist_flag=True,posEmbChan=args.posEmbChan)

@@ -309,7 +309,7 @@ class siteDecoder(tf.keras.layers.Layer):
 
 
 class PKConv(Conv2D):
-    def __init__(self, *args, n_channels=3, mono=False, posEmbChan=1,use_site=False,opeType="add", **kwargs):
+    def __init__(self, *args, n_channels=3, mono=False, posEmbChan=1,use_site=False,opeType="add",eachChannel=False, **kwargs):
         super().__init__(*args, **kwargs)
         if use_site:
             self.input_spec = [InputSpec(ndim=4), InputSpec(ndim=4), InputSpec(ndim=4)]
@@ -318,6 +318,7 @@ class PKConv(Conv2D):
         self.posEmbChan= posEmbChan
         self.use_site = use_site
         self.opeType = opeType
+        self.eachChannel = eachChannel
 
     def build(self, input_shape):        
         """Adapted from original _Conv() layer of Keras        
@@ -364,9 +365,12 @@ class PKConv(Conv2D):
         if self.use_site:
             self.bias = None
             # pdb.set_trace()
-            self.kernel_site = K.constant(np.ones(self.kernel_size + (self.posEmbChan, self.posEmbChan)))
+            self.kernel_site = K.constant(np.ones(self.kernel_size + (self.posEmbChan, self.posEmbChan))/np.prod(self.kernel_size))
         else:
-            bias_shape = (1, input_shape[0][1].value, input_shape[0][2].value, self.posEmbChan)
+            if self.eachChannel:
+                bias_shape = (1, input_shape[0][1].value, input_shape[0][2].value, self.input_dim)
+            else:
+                bias_shape = (1, input_shape[0][1].value, input_shape[0][2].value, self.posEmbChan)
             self.bias = self.add_weight(shape=bias_shape,
                                         initializer=self.bias_initializer,
                                         name='bias',
@@ -418,29 +422,43 @@ class PKConv(Conv2D):
                 dilation_rate=self.dilation_rate
             )
 
-            # 末尾に次元を追加してタイル（位置特性ごとに塊ができるようにタイルするため）
-            # pdb.set_trace()
-            posEmb = K.tile(tf.expand_dims(bias[:1],-1),[1,1,1,1,self.tileNum])
-            posEmb = tf.reshape(posEmb,shape=[1]+images.shape[1:3]+[self.tileNum*self.posEmbChan])
-            tiled_images = K.tile(images,[1,1,1,self.posEmbChan])
-
-
-            # PX = P(位置特性)  ×  X(特徴マップ)
-            pxs = posEmb*tiled_images
-
-            px = 0
-            for c_ind in range(self.posEmbChan):
-                pxi = pxs[:,:,:,self.tileNum*c_ind:self.tileNum*(c_ind+1)]
-                pxi = K.conv2d(
-                    pxi, self.onesKernel, 
+            # 全チャネルに対して位置特性を用意する場合
+            if self.eachChannel:
+                # pdb.set_trace()
+                px = bias*images
+                px = K.conv2d(
+                    px, self.onesKernel, 
                     strides=self.strides,
                     padding='valid',
                     data_format=self.data_format,
                     dilation_rate=self.dilation_rate
                 )
-                px = pxi + px # TODO:いずれはAttenntionなどによる重みつき和を計算したい
+            else:
+
+                # 末尾に次元を追加してタイル（位置特性ごとに塊ができるようにタイルするため）
+                # pdb.set_trace()
+                posEmb = K.tile(tf.expand_dims(bias[:1],-1),[1,1,1,1,self.tileNum])
+                posEmb = tf.reshape(posEmb,shape=[1]+images.shape[1:3]+[self.tileNum*self.posEmbChan])
+                tiled_images = K.tile(images,[1,1,1,self.posEmbChan])
+
+
+                # PX = P(位置特性)  ×  X(特徴マップ)
+                pxs = posEmb*tiled_images
+
+                px = 0
+                for c_ind in range(self.posEmbChan):
+                    pxi = pxs[:,:,:,self.tileNum*c_ind:self.tileNum*(c_ind+1)]
+                    pxi = K.conv2d(
+                        pxi, self.onesKernel, 
+                        strides=self.strides,
+                        padding='valid',
+                        data_format=self.data_format,
+                        dilation_rate=self.dilation_rate
+                    )
+                    px = pxi + px # TODO:いずれはAttenntionなどによる重みつき和を計算したい
 
             img_output = wx + px
+
         elif self.opeType == "mul": # 位置特性を掛け算
             posEmb = K.tile(bias,[1,1,1,self.tileNum])
             px = posEmb*images
@@ -506,9 +524,10 @@ class PKConv(Conv2D):
             return [new_shape, new_shape]
 
 class PKEncoder(tf.keras.layers.Layer):
-    def __init__(self, filters, kernel_size, iterNum, posEmbChan=1, use_site=False, opeType="add", bn=True, istraining=True):
+    def __init__(self, filters, kernel_size, iterNum, posEmbChan=1, use_site=False, opeType="add", bn=True, istraining=True,eachChannel=False):
         super().__init__()
-        self.pkconv = PKConv(filters, kernel_size, posEmbChan=posEmbChan, use_site=use_site, opeType=opeType, strides=2, padding='same')
+        
+        self.pkconv = PKConv(filters, kernel_size, posEmbChan=posEmbChan, use_site=use_site, opeType=opeType, eachChannel=eachChannel, strides=2, padding='same')
         self.count = iterNum
         self.bn = bn
         self.training = istraining
@@ -517,12 +536,13 @@ class PKEncoder(tf.keras.layers.Layer):
         self.opeType = opeType
 
     def call(self,img_in,mask_in,site_in=None):
+        output = []
         if site_in==None:
             conv,mask = self.pkconv([img_in,mask_in])
-            output = [mask]
+            output = output + [mask]
         else:
             conv,mask,site = self.pkconv([img_in,mask_in,site_in])
-            output = [mask,site]
+            output = output + [mask,site]
 
         if self.bn:
             conv = self.batchnorm(conv,training=self.training)

@@ -6,6 +6,16 @@ import pdb
 import keras
 from keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback,Callback
 
+def resize_images(xs,size): # xs=[N,W,H,C]
+    res = []
+    for x in xs:
+        chanXs = []
+        for i in range(x.shape[2]):# channel方向に複数枚の画像が存在する場合
+            chanXs.append(cv2.resize(x[:,:,i],size)[:,:,np.newaxis])
+        chanXs = np.concatenate(chanXs,axis=2)
+        res.append(chanXs)
+
+    return np.array(res)
 
 def rangeError(pre,tru,domain=[-1.0,0.0],opt="MA"): # 欠損部含めた誤差 pred:予測値, true:真値 , domain:値域(domain[0]< y <=domain[1])
     # ある値域の真値のみで誤差を測る

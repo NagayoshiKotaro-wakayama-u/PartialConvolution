@@ -24,7 +24,7 @@ from matplotlib import pyplot as plt
 from PIL import Image
 
 from libs.pconv_model import PConvUnet,sitePConvUnet,PKConvUnet
-from libs.util import MaskGenerator,ImageChunker,rangeError,nonhole,cmap,calcPCV1,clip,calcLabeledError,PSNR
+from libs.util import MaskGenerator,ImageChunker,rangeError,nonhole,cmap,calcPCV1,clip,calcLabeledError,PSNR,resize_images
 from libs.createSpatialHistogram import compSpatialHist, compKL
 
 import pickle
@@ -62,14 +62,17 @@ def parse_args():
     parser.add_argument('-vec','--isUsedVec',action='store_true',help='ベクトルを出力に持つかどうか')
 
     parser.add_argument('-posKernel','--positionalKernel',action='store_true')
+    parser.add_argument('-eachChannel','--eachChannel',action='store_true')
     parser.add_argument('-PKlayers','--PKlayers',type=lambda x:list(map(int,x.split(","))),default=[3],help="list of PKConvlayer number. ex:3,4,5")
     parser.add_argument('-posKernelOpe','--posKernelOpe',type=str,default="add")
-
 
     parser.add_argument('-sitePConv','--sitePConv',action='store_true')
     parser.add_argument('-loadSite','--loadSitePath',type=lambda x:list(map(str,x.split(","))),default="")
     parser.add_argument('-pchan','--posEmbChan',type=int,default=1,help='channnels of position code (learnable)')
+    parser.add_argument('-encFNum','--encFNum',type=lambda x:list(map(int,x.split(","))),default="64,128,256,512,512")
 
+    parser.add_argument('-sScale','--siteScale',type=float,default=1/2550)
+    parser.add_argument('-sBias','--siteBias',type=float,default=0)
 
     return parser.parse_args()
 
@@ -100,18 +103,29 @@ if __name__ == "__main__":
     BATCH_SIZE = 4
 
     # サイト特性として他の画像をロードするかどうか
-    useSite = False
+    useSite = (args.loadSitePath != [""])
     # pdb.set_trace()
-    if args.loadSitePath[0]!="":
+    if useSite:
         #TODO : posEmb shape
-        site_path = f"data{os.sep}siteImages{os.sep}"
+        # site_path = f"data{os.sep}siteImages{os.sep}"
+        site_path = f"data{os.sep}new_siteImages{os.sep}"
+
+        firstLayer = args.PKlayers[0]
+        devide = 2**(firstLayer-1)
+        siteShape = (int(shape[0]/devide),int(shape[1]/devide))
+
+        # 値のスケール化
+        scaling = 1/2550
+        
+        # 複数ある場合はチャネル方向に結合
         if len(args.loadSitePath)>1:
             posEmb = [np.array(Image.open(f"{site_path}{p}"))[:,:,np.newaxis] for p in args.loadSitePath]
-            posEmb = np.concatenate(posEmb,axis=2)[np.newaxis,:,:,:] # [1,H,W,C]
+            posEmb = resize_images(np.concatenate(posEmb,axis=2)[np.newaxis,:,:,:],siteShape) # [1,H,W,C]
         else:
-            posEmb = np.array(Image.open(f"{site_path}{args.loadSitePath[0]}"))/255
-            posEmb = posEmb[np.newaxis,:,:,np.newaxis] # [1,H,W,C]
+            posEmb = np.array(Image.open(f"{site_path}{args.loadSitePath[0]}"))
+            posEmb = resize_images(posEmb[np.newaxis,:,:,np.newaxis],siteShape) # [1,H,W,C]
 
+        posEmb = posEmb*args.siteScale + args.siteBias
         args.posEmbChan = posEmb.shape[3]
         useSite = True
 
@@ -125,7 +139,7 @@ if __name__ == "__main__":
     # モデルをビルドし,学習した重みをロード
     keyArgs = {"img_rows":imgs.shape[1],"img_cols":imgs.shape[2]}
     if args.positionalKernel:
-        keyArgs.update({"use_site":useSite,"posEmbChan":args.posEmbChan,"opeType":args.posKernelOpe,"PKConvlayer":args.PKlayers})
+        keyArgs.update({"use_site":useSite,"posEmbChan":args.posEmbChan,"opeType":args.posKernelOpe,"PKConvlayer":args.PKlayers,"encFNum":args.encFNum,"eachChannel":args.eachChannel})
         model = PKConvUnet(**keyArgs)
     elif args.sitePConv:
         keyArgs.update({"use_site":useSite,"posEmbChan":args.posEmbChan})
@@ -170,9 +184,7 @@ if __name__ == "__main__":
 
     # 位置特性パラメータの抽出
     # pdb.set_trace()
-    if args.loadSitePath != "":
-        pass
-    elif args.sitePConv and not useSite:
+    if args.sitePConv and not useSite:
         for l in range(3):
             siteBias = model.model.layers[4+l].get_weights()[2]
             for i in range(siteBias.shape[3]):
@@ -186,8 +198,15 @@ if __name__ == "__main__":
             # for layer in [[w.name.split(os.sep)[-1] for w in l.weights] for l in model.model.layers]:
             siteBias = model.model.layers[l+1].get_weights()[2]
             plt.close()
-            plt.imshow(siteBias[0,:,:,0])
-            plt.colorbar()
+            if args.eachChannel:
+                fig, axes= plt.subplots(4,4)
+                for i in range(4):
+                    for j in range(4):
+                        axes[i][j].imshow(siteBias[0,:,:,i*4+j])
+            else:
+                plt.imshow(model.model.layers[l+1].get_weights()[2][0,:,:,0])
+                    # fig.colorbar(siteBias[0,:,:,i*4+j])
+
             plt.savefig(path + result_path + os.sep + "positionKernelCode{}-{}_{}.png".format(l,0,args.model))
 
         
