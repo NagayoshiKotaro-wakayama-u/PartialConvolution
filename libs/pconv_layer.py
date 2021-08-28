@@ -2,7 +2,7 @@
 from keras.utils import conv_utils
 from keras import backend as K
 from keras.engine import InputSpec
-from keras.layers import Conv2D, BatchNormalization, Activation, UpSampling2D, Dropout, LeakyReLU
+from keras.layers import Conv2D, BatchNormalization, Activation, UpSampling2D, Dropout, LeakyReLU, GlobalAveragePooling2D
 from keras.layers.merge import Concatenate
 import keras
 import pdb
@@ -309,14 +309,15 @@ class siteDecoder(tf.keras.layers.Layer):
 
 
 class PKConv(Conv2D):
-    def __init__(self, *args, n_channels=3, mono=False, posEmbChan=1,use_site=False,opeType="add",eachChannel=False, **kwargs):
+    def __init__(self, *args, n_channels=3, mono=False, posEmbChan=1,use_site=False,use_sCNN=False,opeType="add",eachChannel=False, **kwargs):
         super().__init__(*args, **kwargs)
-        if use_site:
+        if use_site or use_sCNN:
             self.input_spec = [InputSpec(ndim=4), InputSpec(ndim=4), InputSpec(ndim=4)]
         else:
             self.input_spec = [InputSpec(ndim=4), InputSpec(ndim=4)]
         self.posEmbChan= posEmbChan
         self.use_site = use_site
+        self.use_sCNN = use_sCNN
         self.opeType = opeType
         self.eachChannel = eachChannel
 
@@ -364,8 +365,11 @@ class PKConv(Conv2D):
         # out_shape = self.compute_output_shape(input_shape)[0]
         if self.use_site:
             self.bias = None
-            # pdb.set_trace()
-            self.kernel_site = K.constant(np.ones(self.kernel_size + (self.posEmbChan, self.posEmbChan))/np.prod(self.kernel_size))
+            self.kernel_site = K.constant(
+                np.ones(self.kernel_size + (self.posEmbChan, self.posEmbChan))
+                )
+        elif self.use_sCNN:
+            self.bias = None
         else:
             if self.eachChannel:
                 bias_shape = (1, input_shape[0][1].value, input_shape[0][2].value, self.input_dim)
@@ -389,17 +393,16 @@ class PKConv(Conv2D):
         # Padding done explicitly so that padding becomes part of the masked partial convolution
         images = K.spatial_2d_padding(inputs[0], self.pconv_padding, self.data_format)
         masks = K.spatial_2d_padding(inputs[1], self.pconv_padding, self.data_format)
-        if self.use_site:
-            # pdb.set_trace()
+        if len(inputs)==3:
             bias = K.spatial_2d_padding(inputs[2], self.pconv_padding, self.data_format)
-            site_output = K.conv2d(
-                bias, self.kernel_site,
-                strides=self.strides,
-                padding='valid',
-                data_format=self.data_format,
-                dilation_rate=self.dilation_rate
-            )
-
+            if self.use_site:
+                site_output = K.conv2d(
+                    bias, self.kernel_site,
+                    strides=self.strides,
+                    padding='valid',
+                    data_format=self.data_format,
+                    dilation_rate=self.dilation_rate
+                )
         else:
             bias = K.spatial_2d_padding(self.bias, self.pconv_padding, self.data_format)
 
@@ -487,7 +490,7 @@ class PKConv(Conv2D):
         # Apply activations on the image
         if self.activation is not None:
             img_output = self.activation(img_output)
-            
+          
         if self.use_site:
             outputs = [img_output, mask_output, site_output]
         else:
@@ -524,32 +527,86 @@ class PKConv(Conv2D):
             return [new_shape, new_shape]
 
 class PKEncoder(tf.keras.layers.Layer):
-    def __init__(self, filters, kernel_size, iterNum, posEmbChan=1, use_site=False, opeType="add", bn=True, istraining=True,eachChannel=False):
+    def __init__(self, filters, kernel_size, iterNum, posEmbChan=1, use_site=False, use_sCNN=False, opeType="add", bn=True, istraining=True,eachChannel=False):
         super().__init__()
         
-        self.pkconv = PKConv(filters, kernel_size, posEmbChan=posEmbChan, use_site=use_site, opeType=opeType, eachChannel=eachChannel, strides=2, padding='same')
+        self.pkconv = PKConv(filters, kernel_size, posEmbChan=posEmbChan, use_site=use_site, use_sCNN=use_sCNN, opeType=opeType, eachChannel=eachChannel, strides=2, padding='same')
         self.count = iterNum
         self.bn = bn
         self.training = istraining
         self.batchnorm = BatchNormalization(name='EncBN'+str(self.count))
         self.relu = Activation('relu')
         self.opeType = opeType
+        self.use_sCNN = use_sCNN
 
     def call(self,img_in,mask_in,site_in=None):
-        output = []
         if site_in==None:
-            conv,mask = self.pkconv([img_in,mask_in])
-            output = output + [mask]
+            inputs = [img_in,mask_in]
+        elif self.use_sCNN:
+            inputs=[img_in,mask_in,site_in]
         else:
-            conv,mask,site = self.pkconv([img_in,mask_in,site_in])
-            output = output + [mask,site]
+            inputs=[img_in,mask_in,site_in]
+
+        output = self.pkconv(inputs)
+        conv = output[0]
 
         if self.bn:
             conv = self.batchnorm(conv,training=self.training)
         conv = self.relu(conv)
+        output[0] = conv
         
-        return [conv]+output
+        return output
 
 
+class siteNormalize(tf.keras.layers.Layer):
+    def __init__(self):
+        super().__init__()
+        self.weight = K.variable(value=1)
+        self.bias = K.variable(value=0)
+        
+    def call(self,site_in):
+        return site_in * self.weight + self.bias
 
+class siteConv(Conv2D):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.input_spec = InputSpec(ndim=4)
+        # Calculate padding size to achieve zero-padding
+        self.pconv_padding = (
+            (int((self.kernel_size[0]-1)/2), int((self.kernel_size[0]-1)/2)), 
+            (int((self.kernel_size[0]-1)/2), int((self.kernel_size[0]-1)/2)), 
+        )
+
+        if self.use_bias:
+            self.bias = self.add_weight(shape=(self.filters,),
+                                        initializer=self.bias_initializer,
+                                        name='bias',
+                                        regularizer=self.bias_regularizer,
+                                        constraint=self.bias_constraint)
+    def call(self, inputs):
+        # Padding done explicitly so that padding becomes part of the masked partial convolution
+        # pdb.set_trace()
+        images = K.spatial_2d_padding(inputs, self.pconv_padding, self.data_format)        
+
+        # Apply convolutions to image
+        img_output = K.conv2d(
+            images, self.kernel,
+            strides=self.strides,
+            padding='valid',
+            data_format=self.data_format,
+            dilation_rate=self.dilation_rate
+        )
+
+        # Add bias
+        if self.use_bias:
+            img_output = K.bias_add(
+                img_output,
+                self.bias,
+                data_format=self.data_format)
+
+        # Apply activations on the image
+        if self.activation is not None:
+            img_output = self.activation(img_output)
+            
+        return img_output
 

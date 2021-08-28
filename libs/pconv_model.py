@@ -10,14 +10,14 @@ tf.disable_v2_behavior()
 
 from keras.models import Model
 from keras.optimizers import Adam
-from keras.layers import Input, Conv2D, UpSampling2D, Dropout, LeakyReLU, Lambda, Multiply, Dense, Flatten
+from keras.layers import Input, Conv2D, UpSampling2D, Dropout, LeakyReLU, Lambda, Multiply, Dense, Flatten, GlobalAveragePooling2D
 from keras.layers.merge import Concatenate
 from keras import backend as K
 from keras.utils.multi_gpu_utils import multi_gpu_model
 from keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback,Callback
 from keras_tqdm import TQDMCallback
 
-from libs.pconv_layer import PConv2D,Encoder,Decoder,sitePConv,siteEncoder,siteDecoder,PKEncoder
+from libs.pconv_layer import PConv2D, siteConv,Encoder,Decoder,sitePConv,siteEncoder,siteDecoder,PKEncoder,siteNormalize
 # from libs.createSpatialHistogram import compSpatialHist,compKL
 from PIL import Image
 
@@ -34,7 +34,7 @@ def calcDet(lis,dim):
 
 class PConvUnet(object):
 
-    def __init__(self, img_rows=512, img_cols=512, inference_only=False, net_name='default', gpus=1, thre=0.2, KLthre=0.1, histKLthre=0.05,
+    def __init__(self, img_rows=512, img_cols=512, lr=0.0002, inference_only=False, net_name='default', gpus=1, thre=0.2, KLthre=0.1, histKLthre=0.05,
      isUsedKL=True, isUsedHistKL=True, isUsedLLH=True,LLHonly=False,exist_point_file="", exist_flag=False,
     histFSize=64,histSSize=4, truefirst= False, predfirst=False,  KLbias=True, KLonly=False):
         """Create the PConvUnet. If variable image size, set img_rows and img_cols to None
@@ -51,6 +51,7 @@ class PConvUnet(object):
         # Settings
         self.img_rows = img_rows
         self.img_cols = img_cols
+        self.learning_rate = lr
         #self.img_overlap = 30
         self.inference_only = inference_only
         self.net_name = net_name
@@ -127,13 +128,13 @@ class PConvUnet(object):
             self.outputs_img = self.build_pconv_unet()
             # self.model = Model(inputs=[self.inputs_img, self.inputs_mask], outputs=[self.outputs_img,self.outputs_vec])
             self.model = Model(inputs=[self.inputs_img, self.inputs_mask],outputs=self.outputs_img)
-            self.compile_pconv_unet(self.model, self.inputs_mask)
+            self.compile_pconv_unet(self.model, self.inputs_mask,lr=self.learning_rate)
             # self.loss = loss_total(self.inputs_mask)(self.)
         else:
             with tf.device("/cpu:0"):
                 self.model = Model(inputs=[self.inputs_img, self.inputs_mask], outputs=self.build_pconv_unet())
             self.model = multi_gpu_model(self.model, gpus=self.gpus)
-            self.compile_pconv_unet(self.model, self.inputs_mask)
+            self.compile_pconv_unet(self.model, self.inputs_mask,lr=self.learning_rate)
 
     def build_pconv_unet(self, train_bn=True):
         e_conv1, e_mask1 = self.encoder1(self.inputs_img,self.inputs_mask)
@@ -453,11 +454,12 @@ class PConvUnet(object):
 
 class sitePConvUnet(object):
 
-    def __init__(self, img_rows=512, img_cols=512, use_site=False, inference_only=False, net_name='default', gpus=1,
+    def __init__(self, img_rows=512, img_cols=512, lr=0.0002, use_site=False, inference_only=False, net_name='default', gpus=1,
      exist_point_file="", exist_flag=False, posEmbChan=1):
         # Settings
         self.img_rows = img_rows
         self.img_cols = img_cols
+        self.learning_rate = lr
         #self.img_overlap = 30
         self.inference_only = inference_only
         self.net_name = net_name
@@ -520,12 +522,12 @@ class sitePConvUnet(object):
         if self.gpus <= 1:
             self.outputs_img = self.build_pconv_unet()
             self.model = Model(inputs=inputs,outputs=self.outputs_img)
-            self.compile_pconv_unet(self.model, self.inputs_mask)
+            self.compile_pconv_unet(self.model, self.inputs_mask, lr=self.learning_rate)
         else:
             with tf.device("/cpu:0"):
                 self.model = Model(inputs=inputs, outputs=self.build_pconv_unet())
             self.model = multi_gpu_model(self.model, gpus=self.gpus)
-            self.compile_pconv_unet(self.model, self.inputs_mask)
+            self.compile_pconv_unet(self.model, self.inputs_mask,lr=self.learning_rate)
 
     def build_pconv_unet(self, train_bn=True):
         e_conv1, e_mask1 = self.encoder1(self.inputs_img,self.inputs_mask)
@@ -695,11 +697,14 @@ class sitePConvUnet(object):
 
 class PKConvUnet(object):
 
-    def __init__(self, img_rows=512, img_cols=512, use_site=True, inference_only=False, net_name='default', gpus=1,
-     exist_point_file="", exist_flag=False, posEmbChan=1,opeType="add",PKConvlayer=[3,4,5],encFNum=[64,128,256,512,512],eachChannel=False):
+    def __init__(self, img_rows=512, img_cols=512, lr=0.0002, use_site=True, inference_only=False, net_name='default', gpus=1,
+     exist_point_file="", exist_flag=False, posEmbChan=1,opeType="add",PKConvlayer=[3,4,5],
+     encFNum=[64,128,256,512,512],sCNNFNum=[8,8,8,8,8],eachChannel=False,useSiteCNN=False,sCNNBias=False,sCNNActivation=None
+     ,sCNNSinglePath=False,useSiteNormalize=False):
         # Settings
         self.img_rows = img_rows
         self.img_cols = img_cols
+        self.learning_rate = lr
         #self.img_overlap = 30
         self.inference_only = inference_only
         self.net_name = net_name
@@ -710,6 +715,10 @@ class PKConvUnet(object):
         self.posEmbChan = posEmbChan
         self.firstLayer = PKConvlayer[0]
         self.existFlag = exist_flag
+        self.useSiteCNN = useSiteCNN
+        self.useSiteNormalize = useSiteNormalize
+        self.sCNNBias = sCNNBias
+        self.sCNNSinglePath = sCNNSinglePath
 
         # 存在する点が１・その他が０である入力と同サイズの画像を設定
         if exist_point_file=="":
@@ -728,7 +737,6 @@ class PKConvUnet(object):
         self.inputs_img = Input((self.img_rows, self.img_cols, 1), name='inputs_img')
         self.inputs_mask = Input((self.img_rows, self.img_cols, 1), name='inputs_mask')
 
-
         if use_site:# 位置特性を初めの入力に用いているかどうか
             # pdb.set_trace()
             devide = 2**(self.firstLayer-1)
@@ -736,12 +744,41 @@ class PKConvUnet(object):
             site_col = int(self.img_cols/devide)
             self.inputs_site = Input((site_row, site_col, posEmbChan), name='inputs_site')
             self.inputs = [self.inputs_img, self.inputs_mask,self.inputs_site]
+        elif useSiteCNN:
+            # pdb.set_trace()
+            self.inputs_site = Input((self.img_rows, self.img_cols, posEmbChan), name='inputs_site')
+            self.inputs = [self.inputs_img, self.inputs_mask,self.inputs_site]
         else:
             self.inputs = [self.inputs_img, self.inputs_mask]
 
         ## decide model===========================================================
+
+        # 位置特性の正規化(線形に正規化 OR CNN)--------------------------
+        if self.useSiteNormalize:
+            self.siteNorm = siteNormalize()
+        elif self.useSiteCNN:
+            self.sCNN = []
+            if self.sCNNSinglePath:
+                use_site = True #TODO:Unetの各層出力にサイト特性を含ませるための変更。もう少しスマートなやり方を探したい
+                self.sCNN.append(siteConv(sCNNFNum[0],7,strides=(1,1),use_bias=sCNNBias,activation=sCNNActivation))
+                self.sCNN.append(siteConv(sCNNFNum[1],5,strides=(1,1),use_bias=sCNNBias,activation=sCNNActivation))
+                self.sCNN.append(siteConv(sCNNFNum[3],5,strides=(1,1),use_bias=sCNNBias,activation=sCNNActivation))
+                self.sCNN.append(siteConv(sCNNFNum[4],5,strides=(1,1),use_bias=sCNNBias,activation=sCNNActivation))
+            else:
+                self.sCNN.append(siteConv(sCNNFNum[0],5,strides=(1,1),use_bias=sCNNBias,activation=sCNNActivation))
+                self.sCNN.append(siteConv(sCNNFNum[1],5,strides=(2,2),use_bias=sCNNBias,activation=sCNNActivation))
+                self.sCNN.append(siteConv(sCNNFNum[2],5,strides=(2,2),use_bias=sCNNBias,activation=sCNNActivation))
+                self.sCNN.append(siteConv(sCNNFNum[3],5,strides=(2,2),use_bias=sCNNBias,activation=sCNNActivation))
+                self.sCNN.append(siteConv(sCNNFNum[4],5,strides=(2,2),use_bias=sCNNBias,activation=sCNNActivation))
+            # チャネルが複数の場合は出力にGlobalAveragePoolingをかける
+            # そうでない場合は、なにもかけない
+            self.pools = [GlobalAveragePooling2D() if sCNNFNum[i] > 1 else None for i in range(len(self.sCNN))]
+
+        #---------------------------------------------------
+
         # Args
-        keyArgs = {"posEmbChan":posEmbChan, "use_site":use_site, "opeType":self.opeType, "eachChannel":eachChannel}
+
+        keyArgs = {"posEmbChan":posEmbChan, "use_site":use_site,"use_sCNN":useSiteCNN, "opeType":self.opeType, "eachChannel":eachChannel}
         Args = [
             # [フィルター数,フィルターサイズ,番号]
             [encFNum[0],7, 1],
@@ -753,12 +790,14 @@ class PKConvUnet(object):
         self.PKKey = ["site_in" if (i+1 in PKConvlayer) else None for i in range(len(encFNum))]
 
         # model
+        # エンコーダ5層
         self.encoder1 = PKEncoder(*Args[0], **keyArgs) if (1 in PKConvlayer) else Encoder(*Args[0], bn=False)
         self.encoder2 = PKEncoder(*Args[1], **keyArgs) if (2 in PKConvlayer) else Encoder(*Args[1])
         self.encoder3 = PKEncoder(*Args[2], **keyArgs) if (3 in PKConvlayer) else Encoder(*Args[2])
         self.encoder4 = PKEncoder(*Args[3], **keyArgs) if (4 in PKConvlayer) else Encoder(*Args[3])
         self.encoder5 = PKEncoder(*Args[4], **keyArgs) if (5 in PKConvlayer) else Encoder(*Args[4])
 
+        # デコーダ5層
         self.decoder6 = Decoder(encFNum[3], 3)
         self.decoder7 = Decoder(encFNum[2],3)
         self.decoder8 = Decoder(encFNum[1],3)
@@ -767,19 +806,18 @@ class PKConvUnet(object):
         self.conv2d = Conv2D(1,1,activation='sigmoid',name='output_img')
         ## =======================================================================
 
-
         self.ones33 = K.ones(shape=(3, 3, 1, 1))
 
         # Create UNet-like model
         if self.gpus <= 1:
             self.outputs_img = self.build_pconv_unet()
             self.model = Model(inputs=self.inputs,outputs=self.outputs_img)
-            self.compile_pconv_unet(self.model, self.inputs_mask)
+            self.compile_pconv_unet(self.model, self.inputs_mask,lr=self.learning_rate)
         else:
             with tf.device("/cpu:0"):
                 self.model = Model(inputs=self.inputs, outputs=self.build_pconv_unet())
             self.model = multi_gpu_model(self.model, gpus=self.gpus)
-            self.compile_pconv_unet(self.model, self.inputs_mask)
+            self.compile_pconv_unet(self.model, self.inputs_mask,lr=self.learning_rate)
 
     def build_pconv_unet(self, train_bn=True):
         self.encodeCnt = 0
@@ -787,24 +825,70 @@ class PKConvUnet(object):
             # key(site_inがあるかどうか)がNoneであるかを見て、KeyArgsを返す
             key = self.PKKey[self.encodeCnt]
             self.encodeCnt += 1
-            # pdb.set_trace()
-            if key==None:
-                return {}
-            elif self.encodeCnt==self.firstLayer and self.use_site:
-                # サイト特性を使用する初レイヤーは入力から参照
-                siteValue = self.inputs[2]
-            else:
-                siteValue = outs[2] if len(outs)==3 else None
             
+            # pdb.set_trace()
+            if key==None: # サイト特性を用いない場合
+                return {}
+            elif self.useSiteCNN:# site CNN を使う場合
+                if self.sCNNSinglePath: # CNNの最終出力のみを使用
+                    if self.encodeCnt==self.firstLayer:
+                        siteValue = self.sCNN_outs[-1]
+                    else:
+                        siteValue = outs[2]
+                else:
+                    # indexの開始位置： encodeCnt=1 sCNN_outs=0
+                    siteValue = self.sCNN_outs[self.encodeCnt-1]
+            elif self.encodeCnt==self.firstLayer:
+                # サイト特性を使用する初レイヤーは入力から参照
+                if self.useSiteNormalize:# 正規化する場合
+                    siteValue = self.siteNorm(self.inputs[2])
+                else:
+                    siteValue = self.inputs[2]
+            else:
+                siteValue = outs[2]
+
             return {key:siteValue}
 
-        # pdb.set_trace()
+        # サイト特性の変換ネットワーク各層をつなぐ============
+        if self.useSiteCNN:
+            self.sCNN_outs = []
+            
+            sCNN_out = self.sCNN[0](self.inputs[2])
+            # Poolingによる重み付き和
+            if self.pools[0]!=None:
+                gapAttention0 = K.expand_dims(self.pools[0](sCNN_out),axis=1)
+                gapAttention0 = K.expand_dims(gapAttention0,axis=1)
+                gapAttention0 = K.tile(gapAttention0,[1,self.img_rows,self.img_cols,1])
+                sCNN_out = K.sum(sCNN_out*gapAttention0,axis=-1,keepdims=True)
+
+            self.sCNN_outs.append(sCNN_out)
+
+            for i in range(1, len(self.sCNN)):
+                sCNN_out = self.sCNN[i](sCNN_out)
+                if self.pools[i]!=None: # Poolingによる重み付き和
+                    devide = 2**i
+                    site_row = int(self.img_rows/devide)
+                    site_col = int(self.img_cols/devide)
+                    gapAttention = K.expand_dims(self.pools[i](sCNN_out),axis=1)
+                    gapAttention = K.expand_dims(gapAttention,axis=1)
+                    gapAttention = K.tile(gapAttention,[1,site_row,site_col,1])
+                    sum_sCNN_out = K.sum(sCNN_out*gapAttention,axis=-1,keepdims=True)
+                    self.sCNN_outs.append(sum_sCNN_out)
+                else:
+                    self.sCNN_outs.append(sCNN_out)
+
+            # pdb.set_trace()
+        #==================================================
+
+        # エンコーダ5層
+        # siteExtractの返り値は辞書型
         e1 = self.encoder1(self.inputs[0],self.inputs[1],**siteExtract(self.inputs))
         e2 = self.encoder2(*e1[:2],**siteExtract(e1))
         e3 = self.encoder3(*e2[:2],**siteExtract(e2))
         e4 = self.encoder4(*e3[:2],**siteExtract(e3))
         e5 = self.encoder5(*e4[:2],**siteExtract(e4))
 
+        # デコーダ5層
         d_conv6, d_mask6 = self.decoder6(e5[0], e5[1], e4[0], e4[1])
         d_conv7, d_mask7 = self.decoder7(d_conv6, d_mask6, e3[0], e3[1])
         d_conv8, d_mask8 = self.decoder8(d_conv7, d_mask7, e2[0], e2[1])
@@ -812,7 +896,6 @@ class PKConvUnet(object):
         d_conv10, _ = self.decoder10(d_conv9, d_mask9, self.inputs_img, self.inputs_mask)
 
         outputs = self.conv2d(d_conv10)
-
 
         return outputs
 

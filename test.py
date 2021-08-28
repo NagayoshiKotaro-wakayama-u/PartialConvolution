@@ -17,6 +17,7 @@ from keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback
 from keras import backend as K
 from keras.utils import Sequence
 from keras_tqdm import TQDMCallback
+from keras.models import Model
 
 import matplotlib
 #matplotlib.use('Agg')
@@ -24,13 +25,27 @@ from matplotlib import pyplot as plt
 from PIL import Image
 
 from libs.pconv_model import PConvUnet,sitePConvUnet,PKConvUnet
-from libs.util import MaskGenerator,ImageChunker,rangeError,nonhole,cmap,calcPCV1,clip,calcLabeledError,PSNR,resize_images
+from libs.util import standardize,SqueezedNorm,MaskGenerator,ImageChunker,rangeError,nonhole,cmap,calcPCV1,clip,calcLabeledError,PSNR,resize_images
 from libs.createSpatialHistogram import compSpatialHist, compKL
 
 import pickle
 import cv2
 import tensorflow.compat.v1 as tf
 tf.disable_v2_behavior()
+
+
+def loadSiteImage(paths):#paths=[str1,str2,...,strN]
+    _images = []
+    for path in paths:
+        _img = np.array(Image.open(f"{path}"))[:,:,np.newaxis]
+        
+        if args.stdSite: # 標準化
+            _img = standardize(_img)
+        else: # 線形に正規化
+            _img = _img*args.siteScale + args.siteBias
+
+        _images.append(_img)
+    return _images
 
 def KL(y_true,y_pred):
     true = y_true*exist
@@ -53,7 +68,10 @@ def parse_args():
     parser.add_argument('model',help="学習済みのweightファイルのエポック番号( weights.〇〇.h5 の〇〇の部分)")
     parser.add_argument('-imgw','--imgw',type=int,default=512,help='input width')
     parser.add_argument('-imgh','--imgh',type=int,default=512,help='input height')
+    parser.add_argument('-lr','--lr',type=float,default=0.0002,help='learning rate')
+
     parser.add_argument('-dataset','--dataset',type=str,default='gaussianToyData',help="データセットのディレクトリ名")
+    parser.add_argument('-dtype','--dtype',type=str, default='test',choices=['train', 'valid', 'test'])
     parser.add_argument('-thre','--pcv_thre', type=float, default=0.4, help="固有ベクトル計算時の閾値")
     parser.add_argument('-test','--test',type=str,default="", help="テスト画像のパス")
     parser.add_argument('-posVar','--isPositionVariant',action='store_true',help='位置によってデータの種類が異なる場合に使用')
@@ -69,10 +87,17 @@ def parse_args():
     parser.add_argument('-sitePConv','--sitePConv',action='store_true')
     parser.add_argument('-loadSite','--loadSitePath',type=lambda x:list(map(str,x.split(","))),default="")
     parser.add_argument('-pchan','--posEmbChan',type=int,default=1,help='channnels of position code (learnable)')
+    
+    parser.add_argument('-useSiteNorm','--useSiteNorm',action='store_true')
     parser.add_argument('-encFNum','--encFNum',type=lambda x:list(map(int,x.split(","))),default="64,128,256,512,512")
+    parser.add_argument('-useSiteCNN','--useSiteCNN',action='store_true')
+    parser.add_argument('-sCNNFNum','--sCNNFNum',type=lambda x:list(map(int,x.split(","))),default="1,1,1,1,1")
+    parser.add_argument('-sCNNBias','--sCNNBias',action="store_true")
+    parser.add_argument('-sCNNSinglePath','--sCNNSinglePath',action="store_true")
 
     parser.add_argument('-sScale','--siteScale',type=float,default=1/2550)
     parser.add_argument('-sBias','--siteBias',type=float,default=0)
+    parser.add_argument('-stdSite','--stdSite',action='store_true')
 
     return parser.parse_args()
 
@@ -90,9 +115,9 @@ if __name__ == "__main__":
         os.makedirs(path)
 
     shape = (args.imgh,args.imgw)
-    TEST_PICKLE = dspath+"test.pickle"
+    TEST_PICKLE = f"{dspath}{args.dtype}.pickle"
     # TEST_PICKLE = dspath+"train.pickle"
-    TEST_MASK_PICKLE = dspath+"test_mask.pickle"
+    TEST_MASK_PICKLE = f"{dspath}{args.dtype}_mask.pickle"
     # TEST_MASK_PICKLE = dspath+"train_mask.pickle"
     if "quake" in dspath:
         exist = np.array(Image.open("data/sea.png"))/255
@@ -102,32 +127,22 @@ if __name__ == "__main__":
     exist_rgb = np.tile(exist[:,:,np.newaxis],(1,1,3)) # カラー画像による可視化時に用いる
     BATCH_SIZE = 4
 
-    # サイト特性として他の画像をロードするかどうか
-    useSite = (args.loadSitePath != [""])
-    # pdb.set_trace()
-    if useSite:
-        #TODO : posEmb shape
-        # site_path = f"data{os.sep}siteImages{os.sep}"
-        site_path = f"data{os.sep}new_siteImages{os.sep}"
+    # サイト特性のロード----------------------------------------
+    site_path = f"data{os.sep}new_siteImages{os.sep}"
 
-        firstLayer = args.PKlayers[0]
-        devide = 2**(firstLayer-1)
-        siteShape = (int(shape[0]/devide),int(shape[1]/devide))
+    useSite = False
+    if args.loadSitePath[0]!="":
+        if not args.useSiteCNN:
+            useSite = True
 
-        # 値のスケール化
-        scaling = 1/2550
-        
-        # 複数ある場合はチャネル方向に結合
-        if len(args.loadSitePath)>1:
-            posEmb = [np.array(Image.open(f"{site_path}{p}"))[:,:,np.newaxis] for p in args.loadSitePath]
-            posEmb = resize_images(np.concatenate(posEmb,axis=2)[np.newaxis,:,:,:],siteShape) # [1,H,W,C]
-        else:
-            posEmb = np.array(Image.open(f"{site_path}{args.loadSitePath[0]}"))
-            posEmb = resize_images(posEmb[np.newaxis,:,:,np.newaxis],siteShape) # [1,H,W,C]
-
-        posEmb = posEmb*args.siteScale + args.siteBias
+        # pdb.set_trace()
+        posEmb = loadSiteImage([f"{site_path}{p}" for p in args.loadSitePath])
+        # 複数ロードする場合はチャネル方向に結合
+        posEmb = np.concatenate(posEmb,axis=2) if len(args.loadSitePath)>1 else posEmb[0]
+        posEmb = posEmb[np.newaxis] # [1,H,W,C]
         args.posEmbChan = posEmb.shape[3]
-        useSite = True
+
+    #----------------------------------------------------------
 
 
     tmp = pickle.load(open(TEST_PICKLE,"rb"))
@@ -137,9 +152,11 @@ if __name__ == "__main__":
     masks = pickle.load(open(TEST_MASK_PICKLE,"rb"))
 
     # モデルをビルドし,学習した重みをロード
-    keyArgs = {"img_rows":imgs.shape[1],"img_cols":imgs.shape[2]}
+    keyArgs = {"img_rows":imgs.shape[1],"img_cols":imgs.shape[2],"lr":args.lr}
     if args.positionalKernel:
-        keyArgs.update({"use_site":useSite,"posEmbChan":args.posEmbChan,"opeType":args.posKernelOpe,"PKConvlayer":args.PKlayers,"encFNum":args.encFNum,"eachChannel":args.eachChannel})
+        keyArgs.update({"use_site":useSite,"posEmbChan":args.posEmbChan,"opeType":args.posKernelOpe,
+        "PKConvlayer":args.PKlayers,"encFNum":args.encFNum,"sCNNFNum":args.sCNNFNum,"eachChannel":args.eachChannel,
+        "useSiteCNN":args.useSiteCNN,"sCNNBias":args.sCNNBias, "sCNNSinglePath":args.sCNNSinglePath, "useSiteNormalize":args.useSiteNorm})
         model = PKConvUnet(**keyArgs)
     elif args.sitePConv:
         keyArgs.update({"use_site":useSite,"posEmbChan":args.posEmbChan})
@@ -151,17 +168,16 @@ if __name__ == "__main__":
     model.load(r"{}logs/{}_model/{}".format(path,args.dataset,model_name), train_bn=False)
 
 
-
     chunker = ImageChunker(shape[0], shape[1], 30)
 
     # テスト結果の出力先ディレクトリを作成
-    result_path = "result{}".format(args.model)
-    predict_path = path + result_path + os.sep + "test"
-    compare_path = path+ result_path +os.sep+"comparison"
-    pcv_path = path + result_path +os.sep+"pcv_thre{}_comparison".format(pcv_thre)
-    hist_path = path + result_path + os.sep + "spatialHist_thre{}".format(pcv_thre)
+    result_path = f"result{args.model}"
+    predict_path = f"{path}{result_path}{os.sep}{args.dtype}"
+    compare_path = f"{path}{result_path}{os.sep}{args.dtype}_comparison"
+    # pcv_path = path + result_path +os.sep+"pcv_thre{}_comparison".format(pcv_thre)
+    # hist_path = path + result_path + os.sep + "spatialHist_thre{}".format(pcv_thre)
     region_path = path+result_path+os.sep+"region_comparison"
-    for DIR in [predict_path,compare_path,pcv_path,hist_path,region_path]:
+    for DIR in [predict_path,compare_path,region_path]:
         if not os.path.isdir(DIR):
             os.makedirs(DIR)
     
@@ -169,7 +185,7 @@ if __name__ == "__main__":
     # 保存先リスト
     errors, maes, mses = [],[],[] # 偏差,MAE,MSE
     centers, lines = [], [] # XY座標による主成分分析時の平均・主成分ベクトル
-    mae0, maes_sep = [],[] # 値域ごとのMAE(0の地点とその他0.1間隔での誤差)
+    mae0, maes_sep, psnr0, psnrs_sep = [],[],[],[] # 値域ごとのMAE,PSNR(0の地点とその他0.1間隔での誤差)
     psnrs,KLs = [],[] # 非穴部分のPSNR
     cm_bwr = plt.get_cmap("bwr") # 青から赤へのカラーマップ
     predicts,labels = [],[]
@@ -192,6 +208,43 @@ if __name__ == "__main__":
                 plt.imshow(siteBias[0,:,:,i])
                 plt.colorbar()
                 plt.savefig(path + result_path + os.sep + "positionCode{}-{}_{}.png".format(3+l,i,args.model))
+    elif args.useSiteCNN:
+        # TODO:sCNNのプロット
+        img = imgs[0]
+        mask = masks[0]
+        masked = chunker.dimension_preprocess(deepcopy(img*mask))
+        mask = chunker.dimension_preprocess(deepcopy(mask))
+        inp = [masked,mask,posEmb]
+        
+        sCNN_outs = []
+        if args.sCNNSinglePath:
+            for i in range(4):
+                sCNN=Model(inputs=model.inputs,outputs=model.sCNN[i].output)
+                sCNN_outs.append(sCNN.predict(inp)[0,:,:,0]) # shape=[W,H]
+        else:
+            for i in range(5):
+                sCNN=Model(inputs=model.inputs,outputs=model.sCNN[i].output)
+                sCNN_outs.append(sCNN.predict(inp)[0,:,:,0]) # shape=[W,H]
+
+        vmax=max([np.max(out) for out in sCNN_outs])
+        vmin=min([np.min(out) for out in sCNN_outs])
+        _, axes = plt.subplots(1,6, figsize=(32, 5))
+        for i,out in enumerate(sCNN_outs):
+            # pdb.set_trace()
+            axes[i].set_title(f"layer{i+1}")
+            axes[i].imshow(out,cmap="bwr",norm=SqueezedNorm(vmin=vmin,vmax=vmax,mid=0))
+            # out = cm_bwr(clip(out,vrange,-vrange))[:,:,:3]
+            # axes[i].imshow(out)
+        
+        # pdb.set_trace()
+        cbar = np.array([[vmin,vmax]])
+        im=axes[5].imshow(cbar,cmap="bwr",norm=SqueezedNorm(vmin=vmin,vmax=vmax,mid=0))
+        plt.gca().set_visible(False)
+        plt.colorbar(im,ax=axes[5])
+        plt.savefig(f"{path}{result_path}{os.sep}siteCNN_outs.png")
+        # exit()
+
+
     elif args.positionalKernel and not useSite:
         # pdb.set_trace()
         for l in args.PKlayers:
@@ -209,15 +262,24 @@ if __name__ == "__main__":
 
             plt.savefig(path + result_path + os.sep + "positionKernelCode{}-{}_{}.png".format(l,0,args.model))
 
-        
+    elif args.useSiteNorm:
+        # pdb.set_trace()
+        _w,_b = model.model.layers[3].get_weights()
+        normedSite = posEmb*_w + _b
+        plt.close()
+        plt.imshow(normedSite[0,:,:,0])
+        plt.colorbar()
+        plt.savefig(path + result_path + os.sep + "normedSite.png")
 
+
+        
     # 予測してプロット
     for name,img,mask,ite in zip(names,imgs,masks,[i for i in range(len(names))]):
         print("\r progress : {}/{}".format(ite+1,len(names)),end="")
 
         masked = chunker.dimension_preprocess(deepcopy(img*mask))
         masks = chunker.dimension_preprocess(deepcopy(mask))
-        if useSite:
+        if useSite or args.useSiteCNN:
             inp = [masked,masks,posEmb]
         else:
             inp = [masked,masks]
@@ -263,6 +325,7 @@ if __name__ == "__main__":
         err = pred-img
         mae_grand = np.mean(np.abs(gt_nonh-pred_nonh))
         mse_grand = np.mean((gt_nonh-pred_nonh)**2) # MSEは輝度=>応答スペクトルに変換して計算
+        # pdb.set_trace()
         psnr = PSNR(pred_nonh,gt_nonh)
 
         errors.append(err)
@@ -302,6 +365,12 @@ if __name__ == "__main__":
         mae0.append(e0)
         maes_sep.append(sep_errs)
         axes[2,-1].plot(np.array([(i+1)*0.1 for i in range(10)]),sep_errs)
+
+        # # 各震度値ごとのPSNR
+        e0 = rangeError(pred,img,domain=[-1.0,0.0],opt="PSNR") # 値が0の地点のPSNRを計算
+        sep_errs = [rangeError(pred,img,domain=[i*0.1,(i+1)*0.1],opt="PSNR") for i in range(10)]
+        psnr0.append(e0)
+        psnrs_sep.append(sep_errs)
 
         # AE map
         err = cm_bwr(clip(err,-0.1,0.1))[:,:,:3] # -0.1~0.1の偏差をカラーに変換
@@ -410,8 +479,10 @@ if __name__ == "__main__":
             plt.close()
 
 
+    # pdb.set_trace()
+
     # テスト結果をpickleで保存
-    pred_path = path + result_path + os.sep + "predictImages.pickle"
+    pred_path = f"{path}{result_path}{os.sep}{args.dtype}_predictImages.pickle"
     pickle.dump(np.array(predicts),open(pred_path,"wb"))
 
     if args.isPlotOff: # プロットや評価を出力しない設定
@@ -423,7 +494,7 @@ if __name__ == "__main__":
 
     _,axes = plt.subplots(1,1,figsize=(6,5))
     axes.imshow(err*exist_rgb,vmin=0,vmax=1.0)
-    plt.savefig(path+result_path+os.sep+"mae_map.png")
+    plt.savefig(f"{path}{result_path}{os.sep}{args.dtype}mae_map.png")
     #"""
 
     #"""
@@ -434,7 +505,8 @@ if __name__ == "__main__":
         "MSE":np.mean(np.array(mses)),
         "MAE0":np.mean(np.array(mae0)),
         "MAE-sep0.1":np.mean(np.array(maes_sep)),
-        "KL":np.mean(np.array(KLs))
+        "KL":np.mean(np.array(KLs)),
+        "PSNR-sep0.1":np.array(psnrs_sep)
     }
 
     print("\nPSNR={0:.10f}".format(summary_data["PSNR"]))
@@ -447,7 +519,7 @@ if __name__ == "__main__":
         summary_data["labMSEs"] = labMSEs
         summary_data["labels"] = labels
 
-    pkl_path = os.path.join(path + result_path ,"analysed_data.pickle")
+    pkl_path = f"{path}{result_path}{os.sep}{args.dtype}_analysed_data.pickle"
     with open(pkl_path,"wb") as f:
         pickle.dump(summary_data,f)
     #"""

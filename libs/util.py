@@ -5,6 +5,16 @@ import cv2
 import pdb
 import keras
 from keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback,Callback
+import matplotlib
+
+def standardize(x,exist=None):
+    if exist is not None:
+        img = x[exist==1]
+    else:
+        img = x
+    xmean = np.mean(img)
+    xstd = np.std(img)
+    return (x-xmean)/xstd
 
 def resize_images(xs,size): # xs=[N,W,H,C]
     res = []
@@ -24,6 +34,10 @@ def rangeError(pre,tru,domain=[-1.0,0.0],opt="MA"): # 欠損部含めた誤差 p
     if inds[0].shape[0]==0: # 値がない場合はNaN
         return np.NaN
 
+    if opt=="PSNR":
+        error_ = PSNR(pre[inds[0],inds[1]],tru[inds[0],inds[1]])
+        return error_
+
     error_ = tru[inds[0],inds[1]]-pre[inds[0],inds[1]]
     
     if opt=="MA": # MAE
@@ -32,7 +46,7 @@ def rangeError(pre,tru,domain=[-1.0,0.0],opt="MA"): # 欠損部含めた誤差 p
         error_ = np.mean(error_**2)
     elif opt=="A":
         error_ = np.abs(error_)
-    
+
     return error_
 
 def nonhole(x,hole): # 欠損部以外の値を取り出す
@@ -57,8 +71,11 @@ def cmap(x,exist_rgb=None,sta=[222,222,222],end=[255,0,0]): #x:gray-image([w,h])
             tmp.append(np.array(sta)+x[i,j]*vec)
         res.append(tmp)
     res = np.array(res).astype("uint8")
-    if exist_rgb != None:
+    if exist_rgb is not None:
+        if len(exist_rgb.shape)==2:
+            exist_rgb = np.tile(exist_rgb[:,:,np.newaxis],[1,1,3])
         res[exist_rgb==0] = 255
+
     return res
 
 def calcPCV1(x,pcv_thre): # 第一主成分を抽出
@@ -106,7 +123,10 @@ def calcLabeledError(errors,labels,opt="MA"):
 
     return results,labs
 
-def PSNR(y_pred,y_true):
+def PSNR(y_pred,y_true,exist=None):
+    if exist is not None:
+        y_pred = y_pred[exist==1]
+        y_true = y_true[exist==1]
     return - 10.0 * np.log(np.mean(np.square(y_pred - y_true))) / np.log(10.0)
 
 class PSNREarlyStopping(ModelCheckpoint):
@@ -440,3 +460,18 @@ class ImageChunker(object):
                 i += 1
         
         return reconstruction
+
+class SqueezedNorm(matplotlib.colors.Normalize):
+    def __init__(self, vmin=None, vmax=None, mid=0, s1=2, s2=2, clip=False):
+        self.vmin = vmin # minimum value
+        self.mid  = mid  # middle value
+        self.vmax = vmax # maximum value
+        self.s1=s1; self.s2=s2
+        f = lambda x, zero,vmax,s: np.abs((x-zero)/(vmax-zero))**(1./s)*0.5
+        self.g = lambda x, zero,vmin,vmax, s1,s2: f(x,zero,vmax,s1)*(x>=zero) - \
+                                             f(x,zero,vmin,s2)*(x<zero)+0.5
+        matplotlib.colors.Normalize.__init__(self, vmin, vmax, clip)
+
+    def __call__(self, value, clip=None):
+        r = self.g(value, self.mid,self.vmin,self.vmax, self.s1,self.s2)
+        return np.ma.masked_array(r)

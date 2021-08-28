@@ -24,7 +24,7 @@ matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
 from libs.pconv_model import PConvUnet,sitePConvUnet,PKConvUnet
-from libs.util import MaskGenerator,resize_images
+from libs.util import MaskGenerator,resize_images,standardize
 from PIL import Image
 
 def cmap(x,sta=[222,222,222],end=[255,0,0]): #x:gray-image([w,h]) , sta,end:[B,G,R]
@@ -66,6 +66,27 @@ def calcPCV1(x): # 第一主成分ベクトルを導出し
 
 #     return np.array(res)
 
+def loadSiteImage(paths):#paths=[str1,str2,...,strN]
+    _images = []
+    for path in paths:
+        _img = np.array(Image.open(f"{path}"))[:,:,np.newaxis]
+        
+        if args.stdSite: # 標準化
+            # 海洋部を除いて標準化
+            if "quake" in dataset:
+                _exist = np.array(Image.open(SEA_PATH))/255
+            else:
+                _exist=None
+            # pdb.set_trace()
+            _img = standardize(_img,exist=_exist)
+
+        else: # 線形に正規化
+            _img = _img*args.siteScale + args.siteBias
+
+        _images.append(_img)
+    return _images
+
+
 def parse_args():
     parser = ArgumentParser(description='Training script for PConv inpainting')
     parser.add_argument('experiment',type=str,help='name of experiment, e.g. \'normal_PConv\'')
@@ -81,6 +102,7 @@ def parse_args():
     parser.add_argument('-epochs','--epochs',type=int,default=100,help='training epoch')
     parser.add_argument('-imgw','--imgw',type=int,default=512,help='input width')
     parser.add_argument('-imgh','--imgh',type=int,default=512,help='input height')
+    parser.add_argument('-lr','--lr',type=float,default=0.0002,help='learning rate')
 
     # EarlyStopping
     parser.add_argument('-es','--isEarlyStopOn',action='store_true',help="Flag for using Early stopping")
@@ -110,8 +132,16 @@ def parse_args():
     parser.add_argument('-PKlayers','--PKlayers',type=lambda x:list(map(int,x.split(","))),default=[3],help="list of PKConvlayer number. ex:3,4,5")
     parser.add_argument('-loadSite','--loadSitePath',type=lambda x:list(map(str,x.split(","))),default="")
     parser.add_argument('-encFNum','--encFNum',type=lambda x:list(map(int,x.split(","))),default="64,128,256,512,512")
-    
-    parser.add_argument('-sScale','--siteScale',type=float,default=1/2550)
+
+    parser.add_argument('-useSiteNorm','--useSiteNorm',action='store_true')
+    parser.add_argument('-useSiteCNN','--useSiteCNN',action='store_true')
+    parser.add_argument('-stdSite','--stdSite',action='store_true',help="ロードした位置特性を標準化する。これをオンにすると正規化は行われない。")
+    parser.add_argument('-sCNNFNum','--sCNNFNum',type=lambda x:list(map(int,x.split(","))),default="1,1,1,1,1")
+    parser.add_argument('-sCNNBias','--sCNNBias',action="store_true")
+    parser.add_argument('-sCNNAct','--sCNNAct',default=None)
+    parser.add_argument('-sCNNSinglePath','--sCNNSinglePath',action="store_true")
+
+    parser.add_argument('-sScale','--siteScale',type=float,default=1/255)
     parser.add_argument('-sBias','--siteBias',type=float,default=0)
 
 
@@ -134,8 +164,8 @@ def Generator(paths, batchSize):
             masked = mask*ori # masked image
 
             # pdb.set_trace()
-            if useSite:
-                # pdb.set_trace()
+            if useSite or args.useSiteCNN:
+                # 初めの層のサイズに合わせてサイズ変更
                 devide = 2**(args.PKlayers[0]-1)
                 layer_shape = tuple([int(s/devide) for s in shape])
                 site = np.tile(posEmb,[batchSize,1,1,1])
@@ -148,8 +178,8 @@ def Generator(paths, batchSize):
 
             yield inp, out
 
-class PSNREarlyStopping(ModelCheckpoint):
 
+class PSNREarlyStopping(ModelCheckpoint):
     def __init__(self,savepath,log_path,dataset):
         super(PSNREarlyStopping,self).__init__(
             os.path.join(log_path, dataset+'_model', 'weights.{epoch:02d}.h5'),
@@ -251,6 +281,7 @@ class PSNREarlyStopping(ModelCheckpoint):
             plt.savefig(os.path.join(loss_path,"val_"+lossName+".png"))
             plt.close()
 
+
 # Run script
 if __name__ == '__main__':
     # Parse command-line arguments
@@ -284,25 +315,19 @@ if __name__ == '__main__':
     TEST_MASK_PICKLE = dspath+"test_mask.pickle" if args.testmask=="" else args.testmask
 
     # 地震データの時は海洋部のマスクをロード
-    if "quake" in dataset:
-        SEA_PATH = ".{0}data{0}sea.png".format(os.sep)
-    else:
-        SEA_PATH = ""
+    
+    SEA_PATH = ".{0}data{0}sea.png".format(os.sep) if "quake" in dataset else ""
 
-    useSite = False
-    # pdb.set_trace()
     # 位置エンベッディング画像のロード
+    useSite = False
     if args.loadSitePath[0]!="":
-        useSite = True
-        if len(args.loadSitePath)>1:
-            # pdb.set_trace()
-            posEmb = [np.array(Image.open(f"{site_path}{p}"))[:,:,np.newaxis] for p in args.loadSitePath]
-            posEmb = np.concatenate(posEmb,axis=2)[np.newaxis,:,:,:] # [1,H,W,C]
-        else:
-            posEmb = np.array(Image.open(f"{site_path}{args.loadSitePath[0]}"))
-            posEmb = posEmb[np.newaxis,:,:,np.newaxis] # [1,H,W,C]
+        if not args.useSiteCNN:
+            useSite = True
 
-        posEmb = posEmb*args.siteScale + args.siteBias
+        # pdb.set_trace()
+        posEmb = loadSiteImage([f"{site_path}{p}" for p in args.loadSitePath])
+        posEmb = np.concatenate(posEmb,axis=2) if len(args.loadSitePath)>1 else posEmb[0] # 複数ロードする場合はチャネル方向に結合
+        posEmb = posEmb[np.newaxis] # [1,H,W,C]
         args.posEmbChan = posEmb.shape[3]
 
 
@@ -327,7 +352,7 @@ if __name__ == '__main__':
     # Pick out an example to be send to test samples folder
     test_data = next(test_generator)
 
-    if useSite:
+    if useSite or args.useSiteCNN:
         (masked, mask, site), ori = test_data
     else:
         (masked, mask), ori = test_data
@@ -376,8 +401,10 @@ if __name__ == '__main__':
     # pdb.set_trace()
     # Build the model
     if args.positionalKernel:
-        model = PKConvUnet(img_rows=img_h,img_cols=img_w,use_site=useSite,exist_point_file=SEA_PATH,
-        exist_flag=True,posEmbChan=args.posEmbChan,opeType=args.posKernelOpe,PKConvlayer=args.PKlayers,encFNum=args.encFNum,eachChannel=args.eachChannel)
+        model = PKConvUnet(img_rows=img_h,img_cols=img_w,lr=args.lr,use_site=useSite,exist_point_file=SEA_PATH,
+        exist_flag=True,posEmbChan=args.posEmbChan,opeType=args.posKernelOpe,PKConvlayer=args.PKlayers,
+        encFNum=args.encFNum,sCNNFNum=args.sCNNFNum,eachChannel=args.eachChannel,useSiteCNN=args.useSiteCNN,
+        sCNNBias=args.sCNNBias,sCNNActivation=args.sCNNAct,sCNNSinglePath=args.sCNNSinglePath, useSiteNormalize=args.useSiteNorm)
     elif args.sitePConv:
         model = sitePConvUnet(img_rows=img_h,img_cols=img_w,use_site=useSite,exist_point_file=SEA_PATH,
         exist_flag=True,posEmbChan=args.posEmbChan)
@@ -392,7 +419,7 @@ if __name__ == '__main__':
         if args.stage == 'train':
             model.load(args.checkpoint)
         elif args.stage == 'finetune':
-            model.load(args.checkpoint, train_bn=False, lr=0.00005)
+            model.load(args.checkpoint, train_bn=False, lr=args.lr)
 
     # callback の設定
     callbacks = [
