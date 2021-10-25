@@ -309,23 +309,36 @@ class siteDecoder(tf.keras.layers.Layer):
 
 
 class PKConv(Conv2D):
-    def __init__(self, *args, n_channels=3, mono=False, posEmbChan=1,use_site=False,use_sCNN=False,opeType="add",eachChannel=False, **kwargs):
+    def __init__(self, *args, n_channels=3, mono=False, posEmbChan=1,use_site=False,use_sCNN=False,opeType="add",eachChannel=False,
+        sConvKernelLearn=False,site_range=[0,1],sklSigmoid=False,sConvChan=None,learnMultiSiteW=False, **kwargs):
+        
         super().__init__(*args, **kwargs)
+
         if use_site or use_sCNN:
             self.input_spec = [InputSpec(ndim=4), InputSpec(ndim=4), InputSpec(ndim=4)]
         else:
             self.input_spec = [InputSpec(ndim=4), InputSpec(ndim=4)]
+        
         self.posEmbChan= posEmbChan
         self.use_site = use_site
         self.use_sCNN = use_sCNN
         self.opeType = opeType
         self.eachChannel = eachChannel
+        self.sConvKernelLearn = sConvKernelLearn
+        self.sConvChan = [posEmbChan]*2 if sConvChan is None else sConvChan
+        if use_site:
+            self.site_min = site_range[0]
+            self.site_max = site_range[1]
+        
+        self.multiSiteW_Learn = learnMultiSiteW
+
+        # 学習するときのみ代入
+        self.sklSigmoid = sklSigmoid if self.sConvKernelLearn else False
 
     def build(self, input_shape):        
         """Adapted from original _Conv() layer of Keras        
         param input_shape: list of dimensions for [img, mask]
         """
-
         if self.data_format == 'channels_first':
             channel_axis = 1
         else:
@@ -344,6 +357,7 @@ class PKConv(Conv2D):
                                       regularizer=self.kernel_regularizer,
                                       constraint=self.kernel_constraint)
         
+        # 足し算か掛け算か
         if self.opeType == "add":
             self.onesKernel = K.constant(np.ones(kernel_shape))
         elif self.opeType == "mul":
@@ -361,13 +375,26 @@ class PKConv(Conv2D):
         # Window size - used for normalization
         self.window_size = self.kernel_size[0] * self.kernel_size[1]
 
-        # pdb.set_trace()
-        # out_shape = self.compute_output_shape(input_shape)[0]
+        # 位置特性を使う場合
         if self.use_site:
             self.bias = None
-            self.kernel_site = K.constant(
-                np.ones(self.kernel_size + (self.posEmbChan, self.posEmbChan))
+
+            # 位置特性のカーネル（学習可能か固定か）
+            if self.sConvKernelLearn:
+                self.kernel_site = K.ones(shape=self.kernel_size + (self.sConvChan[0], self.sConvChan[1]))
+            else:
+                self.kernel_site = K.constant(
+                    np.ones(self.kernel_size + (self.sConvChan[0], self.sConvChan[1]))
                 )
+                
+            # 複数の位置特性の加重和を計算するための学習可能な重み
+            if self.multiSiteW_Learn:
+                # pdb.set_trace()
+                self.multiSiteW = self.add_weight(
+                    shape=self.posEmbChan,initializer=keras.initializers.Ones(),
+                    name='multiSiteW',trainable=True
+                    )
+            
         elif self.use_sCNN:
             self.bias = None
         else:
@@ -380,12 +407,12 @@ class PKConv(Conv2D):
                                         name='bias',
                                         regularizer=self.bias_regularizer,
                                         constraint=self.bias_constraint)
-            
+
+        # 特徴マップのチャネル数（位置特性のチャネル数を特徴マップと合わせるために使用）
         self.tileNum = input_shape[0][3].value
         self.built = True
     
     def call(self, inputs, mask=None):
-        
         # Both image and mask must be supplied
         if type(inputs) is not list or len(inputs) > 3 or len(inputs) <= 1:
             raise Exception('PartialConvolution2D must be called on a list of two tensors [img, mask] or [img, mask, site]. Instead got: ' + str(inputs))
@@ -393,30 +420,43 @@ class PKConv(Conv2D):
         # Padding done explicitly so that padding becomes part of the masked partial convolution
         images = K.spatial_2d_padding(inputs[0], self.pconv_padding, self.data_format)
         masks = K.spatial_2d_padding(inputs[1], self.pconv_padding, self.data_format)
+        # pdb.set_trace()
+        # 位置特性を使う場合
         if len(inputs)==3:
             bias = K.spatial_2d_padding(inputs[2], self.pconv_padding, self.data_format)
+        
+            # 位置特性を次の層に渡す際のConvolution
+            # kernel_site はnp.ones()の定数か変数
             if self.use_site:
-                site_output = K.conv2d(
-                    bias, self.kernel_site,
-                    strides=self.strides,
-                    padding='valid',
-                    data_format=self.data_format,
-                    dilation_rate=self.dilation_rate
-                )
+                # 次の層へ位置特性を伝搬
+                # pdb.set_trace()
+                site_output = K.conv2d(bias, self.kernel_site, strides=self.strides, padding='valid',
+                    data_format=self.data_format, dilation_rate=self.dilation_rate)
+            
+                # 次層に渡す前にSigmoidにかける
+                if self.sklSigmoid:
+                    site_output = K.sigmoid(site_output) # 0~1
+                    d_site = self.site_max-self.site_min 
+                    site_output = site_output*d_site + self.site_min
+                else:
+                    site_output = K.clip(site_output, self.site_min, self.site_max)
+
+                # 元の位置特性のチャネル数（枚数）が一枚の時に、
+                # 前の層から渡されたbias(位置特性)が複数チャネルだった場合
+                if bias.shape[3] > 1 and self.posEmbChan == 1:
+                    # 位置エンコーディングに使うbiasは1x1Convで1チャネルにする
+                    bias = K.conv2d(bias, K.constant(np.ones([1,1,bias.shape[3],1])), strides=(1,1), padding='valid',
+                        data_format=self.data_format, dilation_rate=self.dilation_rate)
+                
         else:
             bias = K.spatial_2d_padding(self.bias, self.pconv_padding, self.data_format)
 
         # Apply convolutions to mask
-        mask_output = K.conv2d(
-            masks, self.kernel_mask, 
-            strides=self.strides,
-            padding='valid',
-            data_format=self.data_format,
-            dilation_rate=self.dilation_rate
-        )
+        mask_output = K.conv2d(masks, self.kernel_mask, strides=self.strides, padding='valid',
+            data_format=self.data_format, dilation_rate=self.dilation_rate)
 
         if self.opeType == "add": # 位置特性を足し算(W+P)X
-            # Apply convolutions to image (W*X) 
+            # Apply convolutions to image (W*X)
             wx = K.conv2d(
                 (images*masks), self.kernel, 
                 strides=self.strides,
@@ -425,7 +465,7 @@ class PKConv(Conv2D):
                 dilation_rate=self.dilation_rate
             )
 
-            # 全チャネルに対して位置特性を用意する場合
+            # 全チャネルに対して位置特性を用意している場合
             if self.eachChannel:
                 # pdb.set_trace()
                 px = bias*images
@@ -436,14 +476,13 @@ class PKConv(Conv2D):
                     data_format=self.data_format,
                     dilation_rate=self.dilation_rate
                 )
-            else:
 
+            # 特徴マップのチャネル数より位置特性の枚数が少ない場合
+            else:
                 # 末尾に次元を追加してタイル（位置特性ごとに塊ができるようにタイルするため）
-                # pdb.set_trace()
                 posEmb = K.tile(tf.expand_dims(bias[:1],-1),[1,1,1,1,self.tileNum])
                 posEmb = tf.reshape(posEmb,shape=[1]+images.shape[1:3]+[self.tileNum*self.posEmbChan])
                 tiled_images = K.tile(images,[1,1,1,self.posEmbChan])
-
 
                 # PX = P(位置特性)  ×  X(特徴マップ)
                 pxs = posEmb*tiled_images
@@ -452,7 +491,7 @@ class PKConv(Conv2D):
                 for c_ind in range(self.posEmbChan):
                     pxi = pxs[:,:,:,self.tileNum*c_ind:self.tileNum*(c_ind+1)]
                     pxi = K.conv2d(
-                        pxi, self.onesKernel, 
+                        pxi, self.onesKernel, #マスク処理いるのでは？
                         strides=self.strides,
                         padding='valid',
                         data_format=self.data_format,
@@ -463,34 +502,40 @@ class PKConv(Conv2D):
             img_output = wx + px
 
         elif self.opeType == "mul": # 位置特性を掛け算
+            # pdb.set_trace()
+            tiled_images = K.tile(images,[1,1,1,self.posEmbChan])
             posEmb = K.tile(bias,[1,1,1,self.tileNum])
-            px = posEmb*images
-
-            img_output = K.conv2d(
-                (px*masks), self.kernel, 
-                strides=self.strides,
-                padding='valid',
-                data_format=self.data_format,
-                dilation_rate=self.dilation_rate
-            )
-
+            pxs = posEmb*tiled_images
+            
+            img_output = 0
+            for c_ind in range(self.posEmbChan):
+                pxi = pxs[:,:,:,self.tileNum*c_ind:self.tileNum*(c_ind+1)]
+                img_out = K.conv2d(
+                    (pxi*masks), self.kernel, 
+                    strides=self.strides,
+                    padding='valid',
+                    data_format=self.data_format,
+                    dilation_rate=self.dilation_rate
+                )
+                
+                if self.posEmbChan > 1 and self.multiSiteW_Learn:# 重み和の計算で重みを学習するかどうか
+                    img_output += self.multiSiteW[c_ind] * img_out
+                else: # 平均を取る
+                    img_output += 1/self.posEmbChan * img_out
 
         # Calculate the mask ratio on each pixel in the output mask
         mask_ratio = self.window_size / (mask_output + 1e-8)
-
         # Clip output to be between 0 and 1
         mask_output = K.clip(mask_output, 0, 1)
-
         # Remove ratio values where there are holes
         mask_ratio = mask_ratio * mask_output
-
         # Normalize iamge output
         img_output = img_output * mask_ratio
 
         # Apply activations on the image
         if self.activation is not None:
             img_output = self.activation(img_output)
-          
+
         if self.use_site:
             outputs = [img_output, mask_output, site_output]
         else:
@@ -510,8 +555,10 @@ class PKConv(Conv2D):
                     stride=self.strides[i],
                     dilation=self.dilation_rate[i])
                 new_space.append(new_dim)
+
             new_shape = (input_shape[0][0],) + tuple(new_space) + (self.filters,)
             return [new_shape, new_shape]
+
         if self.data_format == 'channels_first':
             space = input_shape[2:]
             new_space = []
@@ -527,10 +574,15 @@ class PKConv(Conv2D):
             return [new_shape, new_shape]
 
 class PKEncoder(tf.keras.layers.Layer):
-    def __init__(self, filters, kernel_size, iterNum, posEmbChan=1, use_site=False, use_sCNN=False, opeType="add", bn=True, istraining=True,eachChannel=False):
+    def __init__(self, filters, kernel_size, iterNum, posEmbChan=1, use_site=False, use_sCNN=False, opeType="add", bn=True, istraining=True,
+        eachChannel=False,sConvKernelLearn=False,sConvChan=None,site_range=[0,1],sklSigmoid=False,learnMultiSiteW=False):
+        
         super().__init__()
         
-        self.pkconv = PKConv(filters, kernel_size, posEmbChan=posEmbChan, use_site=use_site, use_sCNN=use_sCNN, opeType=opeType, eachChannel=eachChannel, strides=2, padding='same')
+        self.pkconv = PKConv(filters, kernel_size, posEmbChan=posEmbChan, use_site=use_site, use_sCNN=use_sCNN,
+            opeType=opeType, eachChannel=eachChannel,sConvKernelLearn=sConvKernelLearn,sConvChan=sConvChan,
+            site_range=site_range,sklSigmoid=sklSigmoid,learnMultiSiteW=learnMultiSiteW, strides=2, padding='same')
+        
         self.count = iterNum
         self.bn = bn
         self.training = istraining

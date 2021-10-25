@@ -6,6 +6,49 @@ import pdb
 import keras
 from keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback,Callback
 import matplotlib
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+
+# 長方形にテキストを添える
+def AddAxesBBoxRectAndText(fig, ax, text, ec='k', ls='solid', va='top', ha='left', dx=0.01, dy=-0.01) :
+    axpos = ax.get_position()
+    fig.patches.append(Rectangle((axpos.x0, axpos.y0), axpos.x1-axpos.x0, axpos.y1-axpos.y0,
+                                 ls=ls, lw=2, ec=ec,
+                                 fill=False, transform=fig.transFigure, figure=fig))
+    fig.text(axpos.x0+dx, axpos.y1+dy, text, va=va, ha=ha, weight='bold', color=ec, )
+    return None
+
+# 複数のsubplotにまとめてimshowでデータを描画して長方形とテキストを加える
+def multipleSiteImages(fig, axes, sites, vmin=0, vmax=1, draw_rect=True, aspect='equal') :
+    imgs = []
+    if isinstance(axes, np.ndarray):
+        axes = axes.ravel()
+
+    for i, ax in enumerate(axes):
+        # if draw_rect:
+        #     AddAxesBBoxRectAndText(fig, ax, 'before imshow')
+        imgs.append(ax.imshow(sites[:,:,i], origin='lower', vmin=vmin, vmax=vmax, aspect=aspect))
+        ax.set_title('site-{}'.format(i+1))
+    return imgs
+
+# norms=[vmax,vmin]
+def Img2ExistCmap(_x,cmapName="viridis",existImage=None,norms=None):
+    if norms is None:
+        x_max,x_min = [np.max(_x),np.min(_x)]
+        _x=(_x-x_min)/(x_max-x_min)
+    else:
+        x_max,x_min = norms
+        _x = (_x-x_min)/(x_max-x_min)
+
+    cm = plt.get_cmap(cmapName)
+
+    _x=cm((_x*255).astype("uint8"))[:,:,:3]
+    if len(existImage.shape)==2:
+        existImage = np.tile(existImage[:,:,np.newaxis],[1,1,3])
+    
+    _x[existImage==0] = 1
+
+    return _x
 
 def standardize(x,exist=None):
     if exist is not None:

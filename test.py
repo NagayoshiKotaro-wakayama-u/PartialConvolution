@@ -12,6 +12,7 @@ from argparse import ArgumentParser
 from copy import deepcopy
 from tqdm import tqdm
 
+from mpl_toolkits.axes_grid1 import make_axes_locatable, ImageGrid 
 from keras.preprocessing.image import ImageDataGenerator
 from keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback
 from keras import backend as K
@@ -25,7 +26,7 @@ from matplotlib import pyplot as plt
 from PIL import Image
 
 from libs.pconv_model import PConvUnet,sitePConvUnet,PKConvUnet
-from libs.util import standardize,SqueezedNorm,MaskGenerator,ImageChunker,rangeError,nonhole,cmap,calcPCV1,clip,calcLabeledError,PSNR,resize_images
+from libs.util import multipleSiteImages,standardize,SqueezedNorm,MaskGenerator,ImageChunker,rangeError,nonhole,cmap,calcPCV1,clip,calcLabeledError,PSNR,resize_images
 from libs.createSpatialHistogram import compSpatialHist, compKL
 
 import pickle
@@ -65,10 +66,11 @@ def analyse(x):#x = [n,d]
 def parse_args():
     parser = ArgumentParser(description="学習済みのパラメータでテストをし、真値との比較や分析結果の保存を行います")
     parser.add_argument('dir_name',help="実験名(ログファイルのディレクトリ名でxxxx_logsのxxxxの部分のみ)")
-    parser.add_argument('model',help="学習済みのweightファイルのエポック番号( weights.〇〇.h5 の〇〇の部分)")
+    parser.add_argument('model',help="最終的な重みを読み込む場合は best 、エポックで読み込む場合はweights.〇〇.h5 の〇〇の部分")
     parser.add_argument('-imgw','--imgw',type=int,default=512,help='input width')
     parser.add_argument('-imgh','--imgh',type=int,default=512,help='input height')
     parser.add_argument('-lr','--lr',type=float,default=0.0002,help='learning rate')
+    parser.add_argument('-existOff','--existOff',action='store_true',help='予測しない部分を除いて損失を計算')
 
     parser.add_argument('-dataset','--dataset',type=str,default='gaussianToyData',help="データセットのディレクトリ名")
     parser.add_argument('-dtype','--dtype',type=str, default='test',choices=['train', 'valid', 'test'])
@@ -83,6 +85,10 @@ def parse_args():
     parser.add_argument('-eachChannel','--eachChannel',action='store_true')
     parser.add_argument('-PKlayers','--PKlayers',type=lambda x:list(map(int,x.split(","))),default=[3],help="list of PKConvlayer number. ex:3,4,5")
     parser.add_argument('-posKernelOpe','--posKernelOpe',type=str,default="add")
+    parser.add_argument('-klearn','--sConvKernelLearn',action='store_true')
+    parser.add_argument('-sklSigmoid','--sklSigmoid',action='store_true')
+    parser.add_argument('-sConvChan', '--sConvChan', type=int, default=None)
+    parser.add_argument('-mswLearn','--learnMultiSiteW',action='store_true',help="複数チャネルの位置特性を用いて重みつき和を計算する際に重みを学習するかどうか")
 
     parser.add_argument('-sitePConv','--sitePConv',action='store_true')
     parser.add_argument('-loadSite','--loadSitePath',type=lambda x:list(map(str,x.split(","))),default="")
@@ -93,6 +99,7 @@ def parse_args():
     parser.add_argument('-useSiteCNN','--useSiteCNN',action='store_true')
     parser.add_argument('-sCNNFNum','--sCNNFNum',type=lambda x:list(map(int,x.split(","))),default="1,1,1,1,1")
     parser.add_argument('-sCNNBias','--sCNNBias',action="store_true")
+    parser.add_argument('-sCNNAct','--sCNNAct',default=None)
     parser.add_argument('-sCNNSinglePath','--sCNNSinglePath',action="store_true")
 
     parser.add_argument('-sScale','--siteScale',type=float,default=1/2550)
@@ -141,6 +148,7 @@ if __name__ == "__main__":
         posEmb = np.concatenate(posEmb,axis=2) if len(args.loadSitePath)>1 else posEmb[0]
         posEmb = posEmb[np.newaxis] # [1,H,W,C]
         args.posEmbChan = posEmb.shape[3]
+        site_range = [np.min(posEmb),np.max(posEmb)]
 
     #----------------------------------------------------------
 
@@ -151,12 +159,14 @@ if __name__ == "__main__":
     names = ["{0:04d}.png".format(i) for i in range(imgs.shape[0])]
     masks = pickle.load(open(TEST_MASK_PICKLE,"rb"))
 
-    # モデルをビルドし,学習した重みをロード
-    keyArgs = {"img_rows":imgs.shape[1],"img_cols":imgs.shape[2],"lr":args.lr}
+    # モデルをビルドし,学習した重みをロード------------------------------
+    keyArgs = {"img_rows":imgs.shape[1],"img_cols":imgs.shape[2],"lr":args.lr,"existOff":args.existOff}
     if args.positionalKernel:
         keyArgs.update({"use_site":useSite,"posEmbChan":args.posEmbChan,"opeType":args.posKernelOpe,
         "PKConvlayer":args.PKlayers,"encFNum":args.encFNum,"sCNNFNum":args.sCNNFNum,"eachChannel":args.eachChannel,
-        "useSiteCNN":args.useSiteCNN,"sCNNBias":args.sCNNBias, "sCNNSinglePath":args.sCNNSinglePath, "useSiteNormalize":args.useSiteNorm})
+        "useSiteCNN":args.useSiteCNN,"sCNNBias":args.sCNNBias, "sCNNActivation":args.sCNNAct, "sCNNSinglePath":args.sCNNSinglePath,
+        "useSiteNormalize":args.useSiteNorm,"sConvKernelLearn":args.sConvKernelLearn,"sConvChan":args.sConvChan,"site_range":site_range,
+        "sklSigmoid":args.sklSigmoid,"learnMultiSiteW":args.learnMultiSiteW})
         model = PKConvUnet(**keyArgs)
     elif args.sitePConv:
         keyArgs.update({"use_site":useSite,"posEmbChan":args.posEmbChan})
@@ -164,9 +174,9 @@ if __name__ == "__main__":
     else:
         model = PConvUnet(**keyArgs)
 
-    model_name = "weights.{}.h5".format(args.model)
-    model.load(r"{}logs/{}_model/{}".format(path,args.dataset,model_name), train_bn=False)
-
+    model_name = f"weights.{args.model}.h5"
+    model.load(rf"{path}logs/{args.dataset}_model/{model_name}", train_bn=False)
+    #------------------------------------------------------------------
 
     chunker = ImageChunker(shape[0], shape[1], 30)
 
@@ -184,20 +194,24 @@ if __name__ == "__main__":
     #===================================================================================
     # 保存先リスト
     errors, maes, mses = [],[],[] # 偏差,MAE,MSE
-    centers, lines = [], [] # XY座標による主成分分析時の平均・主成分ベクトル
+    # centers, lines = [], [] # XY座標による主成分分析時の平均・主成分ベクトル
     mae0, maes_sep, psnr0, psnrs_sep = [],[],[],[] # 値域ごとのMAE,PSNR(0の地点とその他0.1間隔での誤差)
     psnrs,KLs = [],[] # 非穴部分のPSNR
+    obs_maes, obs_psnrs = [],[] # 観測点のMAE,PSNR
     cm_bwr = plt.get_cmap("bwr") # 青から赤へのカラーマップ
+    cm_vrd = plt.get_cmap("viridis")
     predicts,labels = [],[]
+    reg_errs = [[] for _ in range(4)] # 地域別の誤差
     #===================================================================================
 
     exist_ = exist.astype("float32")[np.newaxis,:,:,np.newaxis]
-    img_sph = compSpatialHist(imgs.astype("float32"),exist_) # original histogram
-    masked_sph = compSpatialHist((imgs*masks).astype("float32"),exist_) # masked histogram
+    # img_sph = compSpatialHist(imgs.astype("float32"),exist_) # original histogram
+    # masked_sph = compSpatialHist((imgs*masks).astype("float32"),exist_) # masked histogram
     
     sess = tf.Session()
-    masked_p,img_p,kls = sess.run([masked_sph,img_sph,compKL(masked_sph,img_sph)])
+    # masked_p,img_p,kls = sess.run([masked_sph,img_sph,compKL(masked_sph,img_sph)])
 
+    ##=====================================================================================================
     # 位置特性パラメータの抽出
     # pdb.set_trace()
     if args.sitePConv and not useSite:
@@ -242,9 +256,7 @@ if __name__ == "__main__":
         plt.gca().set_visible(False)
         plt.colorbar(im,ax=axes[5])
         plt.savefig(f"{path}{result_path}{os.sep}siteCNN_outs.png")
-        # exit()
-
-
+ 
     elif args.positionalKernel and not useSite:
         # pdb.set_trace()
         for l in args.PKlayers:
@@ -271,12 +283,56 @@ if __name__ == "__main__":
         plt.colorbar()
         plt.savefig(path + result_path + os.sep + "normedSite.png")
 
+    elif useSite:
 
-        
+        inp = [imgs[0:1],masks[0:1],posEmb] 
+        # 位置特性の中間出力を可視化（エンコーダから）
+        encs = [model.encoder1,model.encoder2,model.encoder3,model.encoder4,model.encoder5]
+
+        for i,l in enumerate(args.PKlayers[:-1]):
+            # 中間層の位置特性を取得
+            site_output = Model(inputs=model.inputs,outputs=encs[l-1].output)
+            site_output = site_output.predict(inp)[2][0]
+            _siteHeight, _siteWide = site_output.shape[:2]
+            chan = site_output.shape[-1]
+            vmin = np.min(site_output)
+            vmax = np.max(site_output)
+
+            for cInd in range(site_output.shape[-1]):
+                plt.clf()
+                plt.close()
+                _site = site_output[:,:,cInd]
+                # 最小値　最大値　平均
+                sMin, sMax, sMean = [np.min(_site), np.max(_site), np.mean(_site)]
+                sMaxRate = 1.01 if sMax > 0 else 0.99 # プロットするときは範囲を少し広げる
+                sMinRate = 0.99 if sMin > 0 else 1.01
+                plt.title(f"min:{sMin:.4f} max:{sMax:.4f} mean:{sMean:.4f}")
+                plt.imshow(_site,cmap="bwr",norm=SqueezedNorm(vmin=sMin*sMinRate,vmax=sMax*sMaxRate,mid=sMean)) # normはカラーバーの範囲や中心を合わせる正規化
+                plt.colorbar()
+                plt.savefig(f"{path}{result_path}{os.sep}siteFeature_enc{l}-{cInd}.png")
+
+            if site_output.shape[-1] > 1:
+                plt.clf()
+                plt.close()
+                _weight = model.model.layers[3].get_weights()[3][np.newaxis,np.newaxis,:]
+                _site = site_output * np.tile(_weight,[_siteWide,_siteHeight,1])
+                _site = np.sum(_site,axis=2)
+                sMin, sMax, sMean = [np.min(_site), np.max(_site), np.mean(_site)]
+                sMaxRate = 1.01 if sMax > 0 else 0.99 # プロットするときは範囲を少し広げる
+                sMinRate = 0.99 if sMin > 0 else 1.01
+                plt.title(f"min:{sMin:.4f} max:{sMax:.4f} mean:{sMean:.4f}\n weights={_weight}")
+                plt.imshow(_site,cmap="bwr",norm=SqueezedNorm(vmin=sMin*sMinRate,vmax=sMax*sMaxRate,mid=sMean))
+                plt.colorbar()
+                plt.savefig(f"{path}{result_path}{os.sep}weightedSiteFeature_enc{l}.png")
+                pdb.set_trace()
+    
+    # sys.exit()
+    ##=====================================================================================================
     # 予測してプロット
     for name,img,mask,ite in zip(names,imgs,masks,[i for i in range(len(names))]):
         print("\r progress : {}/{}".format(ite+1,len(names)),end="")
 
+        # pdb.set_trace()
         masked = chunker.dimension_preprocess(deepcopy(img*mask))
         masks = chunker.dimension_preprocess(deepcopy(mask))
         if useSite or args.useSiteCNN:
@@ -328,10 +384,16 @@ if __name__ == "__main__":
         # pdb.set_trace()
         psnr = PSNR(pred_nonh,gt_nonh)
 
+        # 観測点の誤差
+        obsMAE = np.mean(np.abs(err[mask==1]))
+        obsPSNR = PSNR(pred,img,exist=mask)
+
         errors.append(err)
         maes.append(mae_grand)
         mses.append(mse_grand)
         psnrs.append(psnr)
+        obs_psnrs.append(obsPSNR)
+        obs_maes.append(obsMAE)
 
         #==========================================================================================
         # 入力・予測・真値の比較
@@ -462,21 +524,73 @@ if __name__ == "__main__":
         # plt.close()
         #==========================================================================================
         # 地域別誤差マップ
+
         if args.plotRegion:
             # pdb.set_trace()
             err_im = copy.copy(err)
             err_im[exist==0] = 0
-            _, axes = plt.subplots(2, 2, figsize=(10, 10))
+            vmax=np.max(err_im)
+            vmin=np.min(err_im)
+
+            _, axes = plt.subplots(5, 4, figsize=(25, 20))
+            # region = {"osaka":"[230:300,225:295]","tokyo":"[150:230,360:445]","hukuoka":"[290:390,35:95]","nagoya":"[200:300,280:380]"}
             region = {"osaka":"[230:300,225:295]","tokyo":"[150:230,360:445]","hukuoka":"[290:390,35:95]","nagoya":"[200:300,280:380]"}
             reg_names = list(region.keys())
 
-            for i in range(2): # 縦（osaka,tokyo,hukuoka,nagoya）
-                for j in range(2):
-                    ind = ((i+1)//2)*2+j%2
-                    axes[i,j].set_title(reg_names[ ind ])
-                    exec("axes[i,j].imshow(err_im"+region[reg_names[ind]]+",vmin=0,vmax=1.0)")
+
+            for i,reg_n in enumerate(reg_names): # 横（osaka,tokyo,hukuoka,nagoya）
+                axes[0,i].set_title(reg_n)
+
+                reg_true_im,reg_pred_im,reg_err_im,reg_exist = [None for _ in range(4)]
+                exec("reg_true_im=img"+region[reg_n])
+                exec("reg_pred_im=pred"+region[reg_n])
+                exec("reg_err_im=err_im"+region[reg_n])
+                exec("reg_exist=exist"+region[reg_n])
+                reg_vecs = [im[reg_exist==1] for im in [reg_true_im,reg_pred_im]]
+
+                reg_errs[i].append(reg_err_im[reg_exist==1]) # 地域別誤差の保存
+
+                # pdb.set_trace()
+                # 正規化
+                t_max,t_min = [np.max(reg_true_im),np.min(reg_true_im)]
+                reg_true_im=(reg_true_im-t_min)/(t_max-t_min)
+                p_max,p_min = [np.max(reg_pred_im),np.min(reg_pred_im)]
+                reg_pred_im=(reg_pred_im-p_min)/(p_max-p_min)
+
+                reg_true_im=cm_vrd((reg_true_im*255).astype("uint8"))[:,:,:3]
+                reg_pred_im=cm_vrd((reg_pred_im*255).astype("uint8"))[:,:,:3]
+                reg_exist = np.tile(reg_exist[:,:,np.newaxis],[1,1,3])
+                
+                reg_true_im[reg_exist==0] = 255
+                reg_pred_im[reg_exist==0] = 255
+                
+                axes[0,i].imshow(reg_true_im)
+                axes[0,0].set_ylabel("true")
+                axes[1,i].imshow(reg_pred_im)
+                axes[1,0].set_ylabel("predict")
+                axes[2,i].imshow(reg_err_im,cmap="bwr",norm=SqueezedNorm(vmin=vmin,vmax=vmax,mid=0))
+                axes[2,0].set_ylabel("error")
+                
+                axes[3,i].scatter(reg_vecs[0],reg_vecs[0],vmin=0,vmax=1)
+                axes[3,0].set_xlabel("true")
+                axes[3,0].set_ylabel("true")
+                axes[3,i].set_ylim(0,1)
+
+                axes[4,i].scatter(reg_vecs[0],reg_vecs[1],vmin=0,vmax=1)
+                axes[4,0].set_xlabel("true")
+                axes[4,0].set_ylabel("predict")
+                axes[4,i].set_ylim(0,1)
+
             plt.savefig(os.path.join(region_path,name))
             plt.close()
+
+
+    if args.plotRegion:
+        reg_maes = [np.mean(np.abs(_err)) for _err in reg_errs]
+        reg_mses = [np.mean(np.square(_err)) for _err in reg_errs]
+        reg_psnrs = [- 10.0 * np.log(mse) / np.log(10.0) for mse in reg_mses]
+        osk,tky,hko,ngy = reg_psnrs
+        print(f"reg_psnrs: osaka={osk}, tokyo={tky}, hukuoka={hko}, nagoya={ngy}")
 
 
     # pdb.set_trace()
@@ -506,11 +620,14 @@ if __name__ == "__main__":
         "MAE0":np.mean(np.array(mae0)),
         "MAE-sep0.1":np.mean(np.array(maes_sep)),
         "KL":np.mean(np.array(KLs)),
-        "PSNR-sep0.1":np.array(psnrs_sep)
+        "PSNR-sep0.1":np.array(psnrs_sep),
+        "obsMAE":np.mean(obs_maes),
+        "obsPSNR":np.mean(obs_psnrs)
     }
 
     print("\nPSNR={0:.10f}".format(summary_data["PSNR"]))
     print("MSE={0:.10f}, MAE={1:.10f}".format(summary_data["MSE"],summary_data["MAE"]))
+    print("\nobs-PSNR={0:.10f}".format(summary_data["obsPSNR"]))
 
     if args.isPositionVariant:
         labMAEs = calcLabeledError(errors,labels,opt="MA")
@@ -518,6 +635,11 @@ if __name__ == "__main__":
         summary_data["labMAEs"] = labMAEs
         summary_data["labMSEs"] = labMSEs
         summary_data["labels"] = labels
+
+    if args.plotRegion:
+        summary_data["reg_maes"] = reg_maes
+        summary_data["reg_mses"] = reg_mses
+        summary_data["reg_psnrs"] = reg_psnrs
 
     pkl_path = f"{path}{result_path}{os.sep}{args.dtype}_analysed_data.pickle"
     with open(pkl_path,"wb") as f:

@@ -15,7 +15,7 @@ from tqdm import tqdm
 
 import keras.backend as K
 from keras.preprocessing.image import ImageDataGenerator
-from keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback,Callback
+from keras.callbacks import TensorBoard, ModelCheckpoint, LambdaCallback,Callback,EarlyStopping
 from keras_tqdm import TQDMCallback
 from keras.models import Model
 
@@ -99,14 +99,15 @@ def parse_args():
     parser.add_argument('-validmask', '--validmask', type=str, default="", help='Folder with validation mask images')
     parser.add_argument( '-testmask', '--testmask', type=str, default="", help='Folder with testing mask images')
     parser.add_argument('-checkpoint', '--checkpoint',type=str, help='Previous weights to be loaded onto model')
-    parser.add_argument('-epochs','--epochs',type=int,default=100,help='training epoch')
+    parser.add_argument('-epochs','--epochs',type=int,default=400,help='training epoch')
     parser.add_argument('-imgw','--imgw',type=int,default=512,help='input width')
     parser.add_argument('-imgh','--imgh',type=int,default=512,help='input height')
     parser.add_argument('-lr','--lr',type=float,default=0.0002,help='learning rate')
+    parser.add_argument('-lossw','--lossWeights',type=lambda x:list(map(float,x.split(","))),default="1,6,0.1")
+    parser.add_argument('-existOff','--existOff',action='store_true',help='予測しない部分を除いて損失を計算')
 
     # EarlyStopping
     parser.add_argument('-es','--isEarlyStopOn',action='store_true',help="Flag for using Early stopping")
-    parser.add_argument('-esEpoch','--earlyStopEpoch',type=int,default=10)
     # 対数尤度
     parser.add_argument('-llh','--LLH',action='store_true')
     parser.add_argument('-llhonly','--LLHonly',action='store_true')
@@ -125,24 +126,29 @@ def parse_args():
     parser.add_argument('-plotTest','--plotTest',action='store_true')
     # サイト特性を考慮したモデルを使用するかどうか
     parser.add_argument('-pchan','--posEmbChan',type=int,default=1,help='channnels of position code (learnable)')
-    parser.add_argument('-sitePConv','--sitePConv',action='store_true')
-    parser.add_argument('-posKernel','--positionalKernel',action='store_true')
+    parser.add_argument('-sitePConv','--sitePConv',action='store_true',help="位置特性を特徴マップに加算")
+    parser.add_argument('-posKernel','--positionalKernel',action='store_true',help="位置特性をカーネルに反映させる")
     parser.add_argument('-eachChannel','--eachChannel',action='store_true')
-    parser.add_argument('-posKernelOpe','--posKernelOpe',type=str,default="add")
+    parser.add_argument('-posKernelOpe','--posKernelOpe',type=str,default="add",help="位置特性をカーネルに反映させる際に足し算(add)か掛け算(mul)か選択(default=add)")
     parser.add_argument('-PKlayers','--PKlayers',type=lambda x:list(map(int,x.split(","))),default=[3],help="list of PKConvlayer number. ex:3,4,5")
-    parser.add_argument('-loadSite','--loadSitePath',type=lambda x:list(map(str,x.split(","))),default="")
-    parser.add_argument('-encFNum','--encFNum',type=lambda x:list(map(int,x.split(","))),default="64,128,256,512,512")
+    parser.add_argument('-loadSite','--loadSitePath',type=lambda x:list(map(str,x.split(","))),default="",help="使用する位置特性のパス")
+    parser.add_argument('-encFNum','--encFNum',type=lambda x:list(map(int,x.split(","))),default="64,128,256,512,512",help="Unetのエンコーダ各階層のフィルタ数")
+    parser.add_argument('-maskGaus','--maskGaussian',type=int,default=None,help="マスク画像を平滑化")
+    parser.add_argument('-klearn','--sConvKernelLearn',action='store_true',help="位置特性を次の層に送る際、位置特性のConvolutionのカーネルを学習するか")
+    parser.add_argument('-sklSigmoid','--sklSigmoid',action='store_true',help="カーネル学習時に位置特性の正規化時、ClipではなくSigmoid関数を用いる")
+    parser.add_argument('-sConvChan', '--sConvChan', type=int, default=None)
+    parser.add_argument('-mswLearn','--learnMultiSiteW',action='store_true',help="複数チャネルの位置特性を用いて重みつき和を計算する際に重みを学習するかどうか")
 
-    parser.add_argument('-useSiteNorm','--useSiteNorm',action='store_true')
-    parser.add_argument('-useSiteCNN','--useSiteCNN',action='store_true')
+    parser.add_argument('-useSiteNorm','--useSiteNorm',action='store_true',help="ロードした位置特性を正規化する")
+    parser.add_argument('-useSiteCNN','--useSiteCNN',action='store_true',help="位置特性の正規化CNNを使用する")
     parser.add_argument('-stdSite','--stdSite',action='store_true',help="ロードした位置特性を標準化する。これをオンにすると正規化は行われない。")
-    parser.add_argument('-sCNNFNum','--sCNNFNum',type=lambda x:list(map(int,x.split(","))),default="1,1,1,1,1")
-    parser.add_argument('-sCNNBias','--sCNNBias',action="store_true")
-    parser.add_argument('-sCNNAct','--sCNNAct',default=None)
-    parser.add_argument('-sCNNSinglePath','--sCNNSinglePath',action="store_true")
+    parser.add_argument('-sCNNFNum','--sCNNFNum',type=lambda x:list(map(int,x.split(","))),default="1,1,1,1,1",help="位置特性の正規化CNN各階層のフィルタ数")
+    parser.add_argument('-sCNNBias','--sCNNBias',action="store_true",help="位置特性の正規化CNNでバイアスを用いる")
+    parser.add_argument('-sCNNAct','--sCNNAct',default=None,help="位置特性の正規化CNNの活性化関数(Kerasで用意されているものから文字列で入力)")
+    parser.add_argument('-sCNNSinglePath','--sCNNSinglePath',action="store_true",help="位置特性の正規化CNNの最終出力だけをUnetに入力")
 
-    parser.add_argument('-sScale','--siteScale',type=float,default=1/255)
-    parser.add_argument('-sBias','--siteBias',type=float,default=0)
+    parser.add_argument('-sScale','--siteScale',type=float,default=1/255,help="位置特性を線形に正規化する際の w")
+    parser.add_argument('-sBias','--siteBias',type=float,default=0,help="位置特性を線形に正規化する際の b")
 
 
     return  parser.parse_args()
@@ -180,7 +186,7 @@ def Generator(paths, batchSize):
 
 
 class PSNREarlyStopping(ModelCheckpoint):
-    def __init__(self,savepath,log_path,dataset):
+    def __init__(self,savepath,log_path,dataset,patience=10):
         super(PSNREarlyStopping,self).__init__(
             os.path.join(log_path, dataset+'_model', 'weights.{epoch:02d}.h5'),
             monitor='val_PSNR',
@@ -188,22 +194,28 @@ class PSNREarlyStopping(ModelCheckpoint):
             save_weights_only=True,
             period = 1
         )
+
         self.best_val_PSNR = -1000
         self.history_val_PSNR = []
         self.best_weights   = None
         self.now_epoch = 0
-        self.limitRatio = 0.05
+        self.limitRatio = 0.01
+        self.patience = patience
+        self.patienceCount = 0
 
         # ロスなどの記録
         if not os.path.isdir(savepath):
             os.makedirs(savepath)
         self.path = os.path.join(savepath,"training_losses.pickle")
-        self.types = ["loss","PSNR","loss_KL","original","loss_Djs"]
+        # self.types = ["loss","PSNR","loss_KL","original","loss_Djs"]
+        self.types = ["loss","PSNR","original"]
         # self.types = ["output_img_"+t for t in self.types]
         # training用
         self.trainingLoss = dict([(t,[]) for t in self.types])
         # validation用
         self.validationLoss = dict([(t,[]) for t in self.types])
+        # 最良モデルのパス
+        self.bestModelPath = os.path.join(log_path, dataset+'_model', 'weights.best.h5')
 
     def on_train_batch_end(self, batch, logs={}): # バッチ終了時に呼び出される
         # pdb.set_trace()
@@ -215,6 +227,8 @@ class PSNREarlyStopping(ModelCheckpoint):
         print("epoch{}".format(epoch))
         self.saveModelPath = self._get_file_path(epoch, logs)
         self.now_epoch += 1
+        self.patienceCount += 1
+
         # 検証時のロスの保存
         for t in self.types:
             self.validationLoss[t].append(logs.get("val_"+t))
@@ -229,11 +243,12 @@ class PSNREarlyStopping(ModelCheckpoint):
             # 検証データのPSNRの最大値を取得
             if val_PSNR > self.best_val_PSNR:
                 self.best_val_PSNR = val_PSNR
+                self.patienceCount = 0
+                self.model.save_weights(self.bestModelPath, overwrite=True, options=self._options)
                 
-            # 指定されたエポック(nエポック)以降で、最大値と比べて5%以上下がっているなら終了
-            if (epoch+1) >= args.earlyStopEpoch:
-                # pdb.set_trace()
-                if self.best_val_PSNR*(1-self.limitRatio) > val_PSNR:
+            # 指定されたエポック(nエポック)以内で、最大値と比べて1%以上上がらなかったら終了
+            if self.patienceCount >= self.patience:
+                if self.best_val_PSNR*(1+self.limitRatio) > val_PSNR:
                     # print("best:{}, current:{}".format(self.best_val_PSNR,np.max(self.history_val_PSNR[-5:])))
                     self.model.stop_training = True
                     self.on_train_end()
@@ -242,12 +257,9 @@ class PSNREarlyStopping(ModelCheckpoint):
 
         # 10回に1回モデルを保存
         if (epoch+1)%10==0:
-            # pdb.set_trace()
-            # self._save_model(epoch=epoch, logs=logs)
             self.model.save_weights(self.saveModelPath, overwrite=True, options=self._options)
 
     def on_train_end(self,logs=None):
-        # self._save_model(epoch=epoch, logs=logs)
         self.model.save_weights(self.saveModelPath, overwrite=True, options=self._options)
 
         summary = {
@@ -314,8 +326,7 @@ if __name__ == '__main__':
     TEST_PICKLE = dspath+"test.pickle" if args.test=="" else args.test
     TEST_MASK_PICKLE = dspath+"test_mask.pickle" if args.testmask=="" else args.testmask
 
-    # 地震データの時は海洋部のマスクをロード
-    
+    # 地震データの時は海洋部のマスクをロード    
     SEA_PATH = ".{0}data{0}sea.png".format(os.sep) if "quake" in dataset else ""
 
     # 位置エンベッディング画像のロード
@@ -324,11 +335,12 @@ if __name__ == '__main__':
         if not args.useSiteCNN:
             useSite = True
 
-        # pdb.set_trace()
         posEmb = loadSiteImage([f"{site_path}{p}" for p in args.loadSitePath])
         posEmb = np.concatenate(posEmb,axis=2) if len(args.loadSitePath)>1 else posEmb[0] # 複数ロードする場合はチャネル方向に結合
         posEmb = posEmb[np.newaxis] # [1,H,W,C]
         args.posEmbChan = posEmb.shape[3]
+
+        site_range = [np.min(posEmb),np.max(posEmb)]
 
 
     train_Num = pickle.load(open(TRAIN_PICKLE,"rb"))["images"].shape[0] # 画像の枚数をカウント
@@ -359,8 +371,7 @@ if __name__ == '__main__':
 
     mask_rgb = np.tile(np.reshape(mask[0],[shape[0],shape[1],1]),(1,1,3)) #カラーで可視化する際に用いるマスク
 
-    # 学習途中のテスト結果が必要ない場合はmodel.fit_generator内で
-    # 以下の plot_callback() を呼び出している行のコメントアウトをして下さい
+    # 学習途中のテスト結果を出力
     def plot_callback(model, path, epoch):
         """Called at the end of each epoch, displaying our previous test images,
         as well as their masked predictions and saving them to disk"""
@@ -398,22 +409,29 @@ if __name__ == '__main__':
             plt.savefig(os.path.join(path, 'img{}_epoch{}.png'.format(i, epoch)))
             plt.close()
 
-    # pdb.set_trace()
+    #---------------------------------------------------------------
     # Build the model
+
+    # pdb.set_trace()
+    ## keyargs
+    keyArgs = {"img_rows":img_h,"img_cols":img_w,"lr":args.lr,"loss_weights":args.lossWeights,"existOff":args.existOff,"exist_point_file":SEA_PATH,"maskGaus":args.maskGaussian}
+
     if args.positionalKernel:
-        model = PKConvUnet(img_rows=img_h,img_cols=img_w,lr=args.lr,use_site=useSite,exist_point_file=SEA_PATH,
-        exist_flag=True,posEmbChan=args.posEmbChan,opeType=args.posKernelOpe,PKConvlayer=args.PKlayers,
-        encFNum=args.encFNum,sCNNFNum=args.sCNNFNum,eachChannel=args.eachChannel,useSiteCNN=args.useSiteCNN,
-        sCNNBias=args.sCNNBias,sCNNActivation=args.sCNNAct,sCNNSinglePath=args.sCNNSinglePath, useSiteNormalize=args.useSiteNorm)
+        keyArgs.update({
+            "use_site":useSite,"posEmbChan":args.posEmbChan,"opeType":args.posKernelOpe,"PKConvlayer":args.PKlayers,
+            "encFNum":args.encFNum,"sCNNFNum":args.sCNNFNum,"eachChannel":args.eachChannel,"useSiteCNN":args.useSiteCNN,
+            "sCNNBias":args.sCNNBias,"sCNNActivation":args.sCNNAct,"sCNNSinglePath":args.sCNNSinglePath,
+            "useSiteNormalize":args.useSiteNorm,"sConvKernelLearn":args.sConvKernelLearn,"sConvChan":args.sConvChan,
+            "site_range":site_range,"sklSigmoid":args.sklSigmoid,"learnMultiSiteW":args.learnMultiSiteW
+        })
+        model = PKConvUnet(**keyArgs)
     elif args.sitePConv:
-        model = sitePConvUnet(img_rows=img_h,img_cols=img_w,use_site=useSite,exist_point_file=SEA_PATH,
-        exist_flag=True,posEmbChan=args.posEmbChan)
+        keyArgs.update({"use_site":useSite,"posEmbChan":args.posEmbChan})
+        model = sitePConvUnet(**keyArgs)
     else:
-        model = PConvUnet(img_rows=img_h,img_cols=img_w,KLthre=args.KLthre,isUsedKL= args.KL,
-        isUsedHistKL=args.histKL,isUsedLLH=args.LLH,LLHonly=args.LLHonly,exist_point_file=SEA_PATH,exist_flag=True,
-        histFSize=args.histFilterSize,truefirst=args.truefirst,predfirst=args.predfirst,KLbias=args.KLbias,KLonly=args.KLonly)   
+        model = PConvUnet(**keyArgs)
 
-
+    #---------------------------------------------------------------
     # Loading of checkpoint（デフォルトではロードせずに初めから学習する）
     if args.checkpoint:
         if args.stage == 'train':
@@ -427,7 +445,8 @@ if __name__ == '__main__':
             log_dir=os.path.join(log_path, dataset+'_model'),
             write_graph=False
         ),
-        PSNREarlyStopping(loss_path,log_path,dataset),
+        PSNREarlyStopping(loss_path,log_path,dataset), # 損失の記録用
+        # EarlyStopping(monitor='val_PSNR',min_delta=0.001,patience=25, verbose=0, mode='max',restore_best_weights=True),
         TQDMCallback()
     ]
 

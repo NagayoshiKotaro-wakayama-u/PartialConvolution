@@ -3,6 +3,8 @@ import sys
 import numpy as np
 from datetime import datetime
 import pdb
+from copy import deepcopy
+import cv2
 
 # import tensorflow as tf
 import tensorflow.compat.v1 as tf
@@ -34,24 +36,15 @@ def calcDet(lis,dim):
 
 class PConvUnet(object):
 
-    def __init__(self, img_rows=512, img_cols=512, lr=0.0002, inference_only=False, net_name='default', gpus=1, thre=0.2, KLthre=0.1, histKLthre=0.05,
-     isUsedKL=True, isUsedHistKL=True, isUsedLLH=True,LLHonly=False,exist_point_file="", exist_flag=False,
-    histFSize=64,histSSize=4, truefirst= False, predfirst=False,  KLbias=True, KLonly=False):
-        """Create the PConvUnet. If variable image size, set img_rows and img_cols to None
+    def __init__(self, img_rows=512, img_cols=512, lr=0.0002,loss_weights=[1,6,0.1], inference_only=False, net_name='default', gpus=1, thre=0.2, KLthre=0.1, histKLthre=0.05,
+     isUsedKL=True, isUsedHistKL=True, isUsedLLH=True,LLHonly=False,existOff=False,exist_point_file="", 
+    histFSize=64,histSSize=4, truefirst= False, predfirst=False,  KLbias=True, KLonly=False,maskGaus=None):
 
-        Args:
-            img_rows (int): image height.
-            img_cols (int): image width.
-            inference_only (bool): initialize BN layers for inference.
-            net_name (str): Name of this network (used in logging).
-            gpus (int): How many GPUs to use for training.
-            KLthre (float): threshold of KL-loss.
-            exist_point_file (str): 存在する点が１・その他が０である入力と同サイズの画像のパス（入力画像内に欠損部以外の未観測点がある場合に使用）
-        """
         # Settings
         self.img_rows = img_rows
         self.img_cols = img_cols
         self.learning_rate = lr
+        self.loss_weights=loss_weights
         #self.img_overlap = 30
         self.inference_only = inference_only
         self.net_name = net_name
@@ -60,6 +53,7 @@ class PConvUnet(object):
         self.thre = thre
         self.KLthre = KLthre
         self.histKLthre = histKLthre
+        self.maskGaus = maskGaus
 
         # KLの第一引数をpredとtrueのどちらにするか
         self.truefirst = truefirst
@@ -74,7 +68,7 @@ class PConvUnet(object):
         self.isUsedHistKL = isUsedHistKL
         self.isUsedLLH = True if LLHonly else isUsedLLH
 
-        self.existFlag = exist_flag
+        self.existOff = existOff
         self.histFSize = histFSize
         self.histSSize = histSSize
 
@@ -84,12 +78,18 @@ class PConvUnet(object):
 
         # 存在する点が１・その他が０である入力と同サイズの画像を設定
         if exist_point_file=="":
-            exist_img = np.ones([self.img_rows,self.img_cols,1])
+            self.exist_img = np.ones([self.img_rows,self.img_cols,1])
         else:
-            exist_img = np.array(Image.open(exist_point_file))[np.newaxis,:,:,np.newaxis]/255
+            self.exist_img = np.array(Image.open(exist_point_file))[np.newaxis,:,:,np.newaxis]/255
+            if self.maskGaus is not None:
+                # ガウシアンフィルタによって平滑化
+                kernel = (maskGaus,maskGaus)
+                self.expand_exist_img = cv2.GaussianBlur(self.exist_img[0,:,:,0]*255,kernel,0)
+                _,self.expand_exist_img = cv2.threshold(self.expand_exist_img, 1, 255, cv2.THRESH_BINARY)
+                self.expand_exist_img = self.expand_exist_img[np.newaxis,:,:,np.newaxis]/255
         
-        self.exist = K.constant(exist_img)
-        self.obsNum = np.sum(exist_img)
+        self.exist = K.constant(self.exist_img)
+        self.obsNum = np.sum(self.exist_img)
 
         # Assertions
         # assert self.img_rows >= 256, 'Height must be >256 pixels'
@@ -160,12 +160,8 @@ class PConvUnet(object):
             metrics=[
                 self.loss_total(inputs_mask),
                 self.loss_origin(inputs_mask),
-                self.loss_KL,
-                self.PSNR,
-                self.loss_Djs
-                # self.loss_likelihood()
+                self.PSNR
             ]
-            # metrics=[self.PSNR,self.loss_KL,self.loss_spatialHistKL,self.loss_origin(inputs_mask)]
         )
 
     def loss_total(self, mask):
@@ -178,174 +174,42 @@ class PConvUnet(object):
             # Compute loss components
 
             origin = self.loss_origin(mask)(y_true,y_pred)
-            l4 = self.loss_KL(y_true, y_pred)
-            l5 = self.loss_spatialHistKL(y_true,y_pred)
-            l6 = self.loss_likelihood()(y_true,y_pred)
 
-            if self.isUsedKL:
-                if self.KLonly:
-                    rslt = tf.identity(l4,name='loss_total')
-                else:
-                    rslt = tf.add(origin,l4,name="loss_total")
-            elif self.isUsedHistKL:
-                rslt = tf.add(origin,l5,name="loss_total")
-            elif self.isUsedLLH:
-                if self.LLHonly:
-                    rslt = tf.identity(l6,name="loss_total")
-                else:
-                    rslt = tf.add(origin,l6,name="loss_total")
-            else:
-                rslt = tf.identity(origin,name="loss_total")
-            
             # Return loss function
-            return rslt
+            return origin
         return lossFunction
 
     # partialConvolution 自体の損失関数
     def loss_origin(self,mask):
         def original(y_true,y_pred):
 
+            # 観測値部分の誤差
             l1 = self.loss_valid(mask, y_true, y_pred)
-            l2 = self.loss_hole(mask, y_true, y_pred)
-            
-            y_comp = mask * y_true + (1-mask) * y_pred
-            l3 = self.loss_tv(mask, y_comp)
 
-            res = l1+6*l2
+            # e_mask ＝ 欠損部（陸地）：０　観測点：１　海域部：１（海洋部を損失に加えない）
+            # mask = 0,1,0   exist_img = 1,1,0   1-exist_img = 0,0,1
+            if self.existOff:
+                if self.maskGaus is None:
+                    e_mask = mask+(1-self.exist_img)
+                else:
+                    e_mask = mask+(1-self.expand_exist_img)
+            else:
+                e_mask = mask
 
-            return tf.add(res,0.1*l3,name="loss_origin")
+            # 欠損部の誤差
+            l2 = self.loss_hole(e_mask, y_true, y_pred)
             
+            # 欠損部のまわり1pxの誤差
+            y_comp = e_mask * y_true + (1-e_mask) * y_pred
+            l3 = self.loss_tv(e_mask, y_comp)
+
+            w1,w2,w3 = self.loss_weights
+
+            res = w1*l1 + w2*l2
+
+            return tf.add(res,w3*l3,name="loss_origin")
+
         return original
-
-    def loss_likelihood(self,smallV=1e-10):
-        def loglikelihood(y_true,y_pred):
-            # pdb.set_trace()
-            y_pred = y_pred*self.exist
-            # p1 = tf.nn.relu(y_true - self.KLthre)
-            p2 = tf.nn.relu(y_pred - self.KLthre)
-            likelihood = -tf.log(y_true*p2)
-            return tf.reduce_sum(likelihood+smallV)
-        return loglikelihood
-
-    # assume gaussian
-    def loss_KL(self,y_true, y_pred,dim=2):
-        def calc_norm(x):
-            # pdb.set_trace()
-            bias = x/(tf.reduce_sum(x,axis=(1,2,3),keepdims=True)+1e-10)
-            meanX = tf.reduce_sum(bias*self.Xmap,axis=(1,2,3),keepdims=True)
-            meanY = tf.reduce_sum(bias*self.Ymap,axis=(1,2,3),keepdims=True)
-            disX = tf.abs((self.Xmap-meanX)*self.exist)
-            disY = tf.abs((self.Ymap-meanY)*self.exist)
-            sigma11 = tf.reduce_sum((disX**2) * bias,axis=(1,2,3),keepdims=True)
-            sigma12 = tf.reduce_sum((disX*disY) * bias,axis=(1,2,3),keepdims=True)
-            sigma22 = tf.reduce_sum((disY**2) * bias,axis=(1,2,3),keepdims=True)
-            
-            return meanX,meanY,sigma11,sigma12,sigma22
-
-        # y_predの中でthre以上の値の座標を取り出すための
-        # softな閾値処理
-        pred = y_pred*self.exist # shape=[N,512,512,1]
-
-        # y_trueの中でthre以上の値の座標を取り出すためのマスクを作成
-        true = y_true*self.exist
-
-        muX1,muY1,sigma11_1,sigma12_1,sigma22_1 = calc_norm(pred)
-        muX2,muY2,sigma11_2,sigma12_2,sigma22_2 = calc_norm(true)
-
-        # 分散共分散行列
-        cov1 = [[ sigma11_1, sigma12_1],
-                [ sigma12_1, sigma22_1]]
-
-        cov2 = [[ sigma11_2, sigma12_2],
-                [ sigma12_2, sigma22_2]]
-
-        # 多変量正規分布(2変量)のKL-Divergenceを計算
-        # 第一項 : shape=[N]
-        det1 = calcDet(cov1,dim)
-        det2 = calcDet(cov2,dim)
-
-        # 第二項 : shape=[N]
-        tr21 = (cov1[0][0]*cov2[1][1] - 2*cov1[0][1]*cov2[0][1] + cov1[1][1]*cov2[0][0])/(det2+1e-10)
-
-        # 第三項 : shape=[N]
-        d_mu = [tf.squeeze(muX1-muX2,axis=[1,2,3]), tf.squeeze(muY1-muY2,axis=[1,2,3])]
-        sq = ((d_mu[0]**2)*cov2[1][1] - 2*d_mu[0]*d_mu[1]*cov2[0][1] + (d_mu[1]**2)*cov2[0][0] )/(det2+1e-10)
-
-        KL = 0.5*(tf.math.log(det2+1e-10)-tf.math.log(det1+1e-10) + tr21 + sq -dim)
-        return KL
-
-    # 空間的ヒストグラム(重み付き)のKL距離
-    def loss_spatialHistKL(self,y_true,y_pred):
-        # pdb.set_trace()
-        p_true = self.compSpatialHist(y_true, kSize=self.histFSize, thre=self.histKLthre)
-        p_pred = self.compSpatialHist(y_pred, kSize=self.histFSize, thre=self.histKLthre)
-        return self.compKL(p_true,p_pred)
-
-    # KL距離
-    def loss_KL_old(self,y_true,y_pred):
-        return self.compKL(y_true,y_pred)
-
-    def compKL(self,p1,p2,smallV=1e-10): # p1:true , p2:pred
-        shape = tf.shape(p1) # shape=[N,w*h*c]
-
-        # 正規化(和が１になるように)
-        p1_reshape = tf.reshape(p1,[shape[0],-1])/(tf.reduce_sum(p1)+smallV)
-        p2_reshape = tf.reshape(p2,[shape[0],-1])/(tf.reduce_sum(p2)+smallV)
-
-        if self.truefirst: # 勾配が -t/p
-            kl = p1_reshape*(tf.math.log(p1_reshape+smallV) - tf.math.log(p2_reshape+smallV))
-            if self.KLbias:
-                kl = kl + p2_reshape # 勾配が 1-t/p になる
-        elif self.predfirst: # 勾配が 1+log(p/t)
-            kl = p2_reshape*(tf.math.log(p2_reshape+smallV) - tf.math.log(p1_reshape+smallV))
-            if self.KLbias:
-                kl = kl - p2_reshape # 勾配が log(p/t) になる
-        else:
-            # Jensen Shanon Divergence : KL(t|p)+KL(p|t)
-            kl_tp = p1_reshape*(tf.math.log(p1_reshape+smallV) - tf.math.log(p2_reshape+smallV))
-            kl_pt = p2_reshape*(tf.math.log(p2_reshape+smallV) - tf.math.log(p1_reshape+smallV))
-
-            kl = kl_tp + kl_pt
-
-        kl = tf.reduce_sum(kl,axis=1)
-        return kl
-
-
-    def loss_Djs(self,y_true,y_pred):
-        smallV = 1e-10
-        shape = tf.shape(y_true) # shape=[N,w*h*c]
-
-        # 正規化(和が１になるように)
-        p1_reshape = tf.reshape(y_true,[shape[0],-1])/(tf.reduce_sum(y_true)+smallV)
-        p2_reshape = tf.reshape(y_pred,[shape[0],-1])/(tf.reduce_sum(y_pred)+smallV)
-        # Jensen Shanon Divergence : KL(t|p)+KL(p|t)
-        kl_tp = p1_reshape*(tf.math.log(p1_reshape+smallV) - tf.math.log(p2_reshape+smallV))
-        kl_pt = p2_reshape*(tf.math.log(p2_reshape+smallV) - tf.math.log(p1_reshape+smallV))
-        Djs = kl_tp + kl_pt
-
-        return tf.reduce_sum(Djs,axis=1)
-
-    def compSpatialHist(self,x, kSize=64, sSize=4, isNormMode='sum', thre=0.0):
-        # binarize images
-        # x_bin = x*self.exist
-        x = tf.nn.relu(x - thre)
-
-        # kernel with all ones
-        kernel = np.ones([kSize,kSize,1,1])
-        kernel = tf.constant(kernel, dtype=tf.float32)
-        
-        # histogram using conv2d
-        x_conv = tf.nn.conv2d(x,kernel,strides=[1,sSize,sSize,1],padding='VALID')
-        shape = tf.shape(x_conv)
-        x_conv_flat = tf.reshape(x_conv,[shape[0],shape[1]*shape[2]])
-
-        if isNormMode == 'max':
-            x_conv_flat = x_conv_flat/tf.reduce_max(x_conv_flat,axis=1,keepdims=True)
-        elif isNormMode == 'sum':
-            x_conv_flat = x_conv_flat/tf.reduce_sum(x_conv_flat,axis=1,keepdims=True)
-
-        x_conv = tf.reshape(x_conv_flat,[shape[0],shape[1],shape[2]])
-        return x_conv
 
     def loss_hole(self, mask, y_true, y_pred):
         """Pixel L1 loss within the hole / mask"""
@@ -390,24 +254,21 @@ class PConvUnet(object):
 
     def load(self, filepath, train_bn=True, lr=0.0002):
         # Load weights into model
-        epoch = int(os.path.basename(filepath).split('.')[1].split('-')[0])
-        assert epoch > 0, "Could not parse weight file. Should include the epoch"
-        self.current_epoch = epoch
+        epoch = os.path.basename(filepath).split('.')[1].split('-')[0]
+        try:
+            epoch = int(epoch)
+        except ValueError:
+            self.current_epoch = 100
+        else:
+            self.current_epoch = epoch
+
         self.model.load_weights(filepath)
 
-    @staticmethod
-    def PSNR(y_true, y_pred):
-        """
-        PSNR is Peek Signal to Noise Ratio, see https://en.wikipedia.org/wiki/Peak_signal-to-noise_ratio
-        The equation is:
-        PSNR = 20 * log10(MAX_I) - 10 * log10(MSE)
-
-        Our input is scaled with be within the range -2.11 to 2.64 (imagenet value scaling). We use the difference between these
-        two values (4.75) as MAX_I
-        """
-
+    # @staticmethod
+    def PSNR(self,y_true, y_pred):
+        pred = y_pred*self.exist_img
         #return 20 * K.log(4.75) / K.log(10.0) - 10.0 * K.log(K.mean(K.square(y_pred - y_true))) / K.log(10.0)
-        return - 10.0 * K.log(K.mean(K.square(y_pred - y_true))) / K.log(10.0)
+        return - 10.0 * K.log(K.mean(K.square(pred - y_true))) / K.log(10.0)
 
     @staticmethod
     def current_timestamp():
@@ -455,7 +316,7 @@ class PConvUnet(object):
 class sitePConvUnet(object):
 
     def __init__(self, img_rows=512, img_cols=512, lr=0.0002, use_site=False, inference_only=False, net_name='default', gpus=1,
-     exist_point_file="", exist_flag=False, posEmbChan=1):
+     existOff=False,exist_point_file="",  posEmbChan=1, maskGaus=None):
         # Settings
         self.img_rows = img_rows
         self.img_cols = img_cols
@@ -466,15 +327,22 @@ class sitePConvUnet(object):
         self.gpus = gpus
         self.losses = None
         self.use_site = use_site
+        self.maskGaus = maskGaus
 
-        self.existFlag = exist_flag
+        self.existOff = existOff
 
         # 存在する点が１・その他が０である入力と同サイズの画像を設定
         if exist_point_file=="":
             exist_img = np.ones([self.img_rows,self.img_cols,1])
         else:
             exist_img = np.array(Image.open(exist_point_file))[np.newaxis,:,:,np.newaxis]/255
-        
+            if self.maskGaus is not None:
+                # ガウシアンフィルタによって平滑化
+                kernel = (maskGaus,maskGaus)
+                self.expand_exist_img = cv2.GaussianBlur(self.exist_img[0,:,:,0]*255,kernel,0)
+                _,self.expand_exist_img = cv2.threshold(self.expand_exist_img, 1, 255, cv2.THRESH_BINARY)
+                self.expand_exist_img = self.expand_exist_img[np.newaxis,:,:,np.newaxis]/255
+
         self.exist = K.constant(exist_img)
         self.obsNum = np.sum(exist_img)
 
@@ -578,11 +446,25 @@ class sitePConvUnet(object):
     def loss_origin(self,mask):
         def original(y_true,y_pred):
 
+            # 観測値部分の誤差
             l1 = self.loss_valid(mask, y_true, y_pred)
-            l2 = self.loss_hole(mask, y_true, y_pred)
+
+            # e_mask ＝ 欠損部（陸地）：０　観測点：１　海域部：１（海洋部を損失に加えない）
+            # mask = 0,1,0   exist_img = 1,1,0   1-exist_img = 0,0,1
+            if self.existOff:
+                if self.maskGaus is None:
+                    e_mask = mask+(1-self.exist_img)
+                else:
+                    e_mask = mask+(1-self.expand_exist_img)
+            else:
+                e_mask = mask
+
+            # 欠損部の誤差
+            l2 = self.loss_hole(e_mask, y_true, y_pred)
             
-            y_comp = mask * y_true + (1-mask) * y_pred
-            l3 = self.loss_tv(mask, y_comp)
+            # 欠損部のまわり1pxの誤差
+            y_comp = e_mask * y_true + (1-e_mask) * y_pred
+            l3 = self.loss_tv(e_mask, y_comp)
 
             res = l1+6*l2
 
@@ -633,24 +515,21 @@ class sitePConvUnet(object):
 
     def load(self, filepath, train_bn=True, lr=0.0002):
         # Load weights into model
-        epoch = int(os.path.basename(filepath).split('.')[1].split('-')[0])
-        assert epoch > 0, "Could not parse weight file. Should include the epoch"
-        self.current_epoch = epoch
+        epoch = os.path.basename(filepath).split('.')[1].split('-')[0]
+        try:
+            epoch = int(epoch)
+        except ValueError:
+            self.current_epoch = 100
+        else:
+            self.current_epoch = epoch
+
         self.model.load_weights(filepath)
 
-    @staticmethod
-    def PSNR(y_true, y_pred):
-        """
-        PSNR is Peek Signal to Noise Ratio, see https://en.wikipedia.org/wiki/Peak_signal-to-noise_ratio
-        The equation is:
-        PSNR = 20 * log10(MAX_I) - 10 * log10(MSE)
-
-        Our input is scaled with be within the range -2.11 to 2.64 (imagenet value scaling). We use the difference between these
-        two values (4.75) as MAX_I
-        """
-
+    # @staticmethod
+    def PSNR(self,y_true, y_pred):
+        pred = y_pred*self.exist_img
         #return 20 * K.log(4.75) / K.log(10.0) - 10.0 * K.log(K.mean(K.square(y_pred - y_true))) / K.log(10.0)
-        return - 10.0 * K.log(K.mean(K.square(y_pred - y_true))) / K.log(10.0)
+        return - 10.0 * K.log(K.mean(K.square(pred - y_true))) / K.log(10.0)
 
     @staticmethod
     def current_timestamp():
@@ -697,14 +576,16 @@ class sitePConvUnet(object):
 
 class PKConvUnet(object):
 
-    def __init__(self, img_rows=512, img_cols=512, lr=0.0002, use_site=True, inference_only=False, net_name='default', gpus=1,
-     exist_point_file="", exist_flag=False, posEmbChan=1,opeType="add",PKConvlayer=[3,4,5],
+    def __init__(self, img_rows=512, img_cols=512, lr=0.0002, loss_weights=[1,6,0.1], use_site=True, inference_only=False, net_name='default', gpus=1,
+     existOff=False,exist_point_file="", posEmbChan=1,opeType="add",PKConvlayer=[3,4,5],
      encFNum=[64,128,256,512,512],sCNNFNum=[8,8,8,8,8],eachChannel=False,useSiteCNN=False,sCNNBias=False,sCNNActivation=None
-     ,sCNNSinglePath=False,useSiteNormalize=False):
+     ,sCNNSinglePath=False,useSiteNormalize=False,maskGaus=None,sConvKernelLearn=False,sConvChan=None,site_range=[0,1],sklSigmoid=False
+     ,learnMultiSiteW=False):
         # Settings
         self.img_rows = img_rows
         self.img_cols = img_cols
         self.learning_rate = lr
+        self.lossWeights = loss_weights
         #self.img_overlap = 30
         self.inference_only = inference_only
         self.net_name = net_name
@@ -714,20 +595,30 @@ class PKConvUnet(object):
         self.opeType = opeType
         self.posEmbChan = posEmbChan
         self.firstLayer = PKConvlayer[0]
-        self.existFlag = exist_flag
+        self.existOff = existOff
         self.useSiteCNN = useSiteCNN
         self.useSiteNormalize = useSiteNormalize
         self.sCNNBias = sCNNBias
         self.sCNNSinglePath = sCNNSinglePath
-
+        self.maskGaus = maskGaus
+        self.sConvKernelLearn = sConvKernelLearn
+        self.sConvChan = sConvChan
+        self.learnMultiSiteW = learnMultiSiteW
+        
         # 存在する点が１・その他が０である入力と同サイズの画像を設定
         if exist_point_file=="":
-            exist_img = np.ones([self.img_rows,self.img_cols,1])
+            self.exist_img = np.ones([self.img_rows,self.img_cols,1])
         else:
-            exist_img = np.array(Image.open(exist_point_file))[np.newaxis,:,:,np.newaxis]/255
+            self.exist_img = np.array(Image.open(exist_point_file))[np.newaxis,:,:,np.newaxis]/255
+            if self.maskGaus is not None:
+                # ガウシアンフィルタによって平滑化
+                kernel = (maskGaus,maskGaus)
+                self.expand_exist_img = cv2.GaussianBlur(self.exist_img[0,:,:,0]*255,kernel,0)
+                _,self.expand_exist_img = cv2.threshold(self.expand_exist_img, 1, 255, cv2.THRESH_BINARY)
+                self.expand_exist_img = self.expand_exist_img[np.newaxis,:,:,np.newaxis]/255
         
-        self.exist = K.constant(exist_img)
-        self.obsNum = np.sum(exist_img)
+        self.exist = K.constant(self.exist_img)
+        self.obsNum = np.sum(self.exist_img)
 
         # Set current epoch
         self.current_epoch = 0
@@ -738,14 +629,12 @@ class PKConvUnet(object):
         self.inputs_mask = Input((self.img_rows, self.img_cols, 1), name='inputs_mask')
 
         if use_site:# 位置特性を初めの入力に用いているかどうか
-            # pdb.set_trace()
             devide = 2**(self.firstLayer-1)
             site_row = int(self.img_rows/devide)
             site_col = int(self.img_cols/devide)
             self.inputs_site = Input((site_row, site_col, posEmbChan), name='inputs_site')
             self.inputs = [self.inputs_img, self.inputs_mask,self.inputs_site]
         elif useSiteCNN:
-            # pdb.set_trace()
             self.inputs_site = Input((self.img_rows, self.img_cols, posEmbChan), name='inputs_site')
             self.inputs = [self.inputs_img, self.inputs_mask,self.inputs_site]
         else:
@@ -765,6 +654,7 @@ class PKConvUnet(object):
                 self.sCNN.append(siteConv(sCNNFNum[3],5,strides=(1,1),use_bias=sCNNBias,activation=sCNNActivation))
                 self.sCNN.append(siteConv(sCNNFNum[4],5,strides=(1,1),use_bias=sCNNBias,activation=sCNNActivation))
             else:
+                # self.sCNN.append()
                 self.sCNN.append(siteConv(sCNNFNum[0],5,strides=(1,1),use_bias=sCNNBias,activation=sCNNActivation))
                 self.sCNN.append(siteConv(sCNNFNum[1],5,strides=(2,2),use_bias=sCNNBias,activation=sCNNActivation))
                 self.sCNN.append(siteConv(sCNNFNum[2],5,strides=(2,2),use_bias=sCNNBias,activation=sCNNActivation))
@@ -777,8 +667,9 @@ class PKConvUnet(object):
         #---------------------------------------------------
 
         # Args
-
-        keyArgs = {"posEmbChan":posEmbChan, "use_site":use_site,"use_sCNN":useSiteCNN, "opeType":self.opeType, "eachChannel":eachChannel}
+        keyArgs = {"posEmbChan":posEmbChan, "use_site":use_site,"use_sCNN":useSiteCNN, "opeType":self.opeType,
+         "eachChannel":eachChannel,"sConvKernelLearn":sConvKernelLearn,"site_range":site_range,
+         "sklSigmoid":sklSigmoid,"sConvChan":self.sConvChan, "learnMultiSiteW":self.learnMultiSiteW}
         Args = [
             # [フィルター数,フィルターサイズ,番号]
             [encFNum[0],7, 1],
@@ -791,11 +682,19 @@ class PKConvUnet(object):
 
         # model
         # エンコーダ5層
+        if self.sConvChan is not None:
+            keyArgs["sConvChan"] = [1,self.sConvChan]
         self.encoder1 = PKEncoder(*Args[0], **keyArgs) if (1 in PKConvlayer) else Encoder(*Args[0], bn=False)
+        if self.sConvChan is not None:
+            # keyArgs["sConvChan"] = [self.sConvChan]*2
+            pass
+
         self.encoder2 = PKEncoder(*Args[1], **keyArgs) if (2 in PKConvlayer) else Encoder(*Args[1])
         self.encoder3 = PKEncoder(*Args[2], **keyArgs) if (3 in PKConvlayer) else Encoder(*Args[2])
         self.encoder4 = PKEncoder(*Args[3], **keyArgs) if (4 in PKConvlayer) else Encoder(*Args[3])
+        keyArgs["sConvKernelLearn"] = False
         self.encoder5 = PKEncoder(*Args[4], **keyArgs) if (5 in PKConvlayer) else Encoder(*Args[4])
+        # keyArgs["sConvKernelLearn"] = True
 
         # デコーダ5層
         self.decoder6 = Decoder(encFNum[3], 3)
@@ -826,57 +725,63 @@ class PKConvUnet(object):
             key = self.PKKey[self.encodeCnt]
             self.encodeCnt += 1
             
-            # pdb.set_trace()
-            if key==None: # サイト特性を用いない場合
+            # サイト特性を用いない場合
+            if key==None:
                 return {}
-            elif self.useSiteCNN:# site CNN を使う場合
-                if self.sCNNSinglePath: # CNNの最終出力のみを使用
+            # site CNN を使う場合（正規化CNN）
+            elif self.useSiteCNN:
+                if self.sCNNSinglePath: # CNNの最終出力のみ使用
                     if self.encodeCnt==self.firstLayer:
                         siteValue = self.sCNN_outs[-1]
                     else:
                         siteValue = outs[2]
-                else:
+                else:# CNNの途中出力を順に使用
                     # indexの開始位置： encodeCnt=1 sCNN_outs=0
-                    siteValue = self.sCNN_outs[self.encodeCnt-1]
-            elif self.encodeCnt==self.firstLayer:
-                # サイト特性を使用する初レイヤーは入力から参照
-                if self.useSiteNormalize:# 正規化する場合
-                    siteValue = self.siteNorm(self.inputs[2])
-                else:
-                    siteValue = self.inputs[2]
+                    # 第一層目は入力をかける
+                    siteValue = self.sCNN_outs[self.encodeCnt-1] if  self.encodeCnt!=self.firstLayer else self.inputs[2]
             else:
-                siteValue = outs[2]
+                # サイト特性を使用する初レイヤーは入力から参照
+                if self.encodeCnt==self.firstLayer:
+                    if self.useSiteNormalize:# 正規化する場合
+                        siteValue = self.siteNorm(self.inputs[2])
+                    else:
+                        siteValue = self.inputs[2]
+                # サイト特性を前の層から受け取る場合
+                else:
+                    siteValue = outs[2]
 
             return {key:siteValue}
 
         # サイト特性の変換ネットワーク各層をつなぐ============
         if self.useSiteCNN:
+            # pdb.set_trace()
             self.sCNN_outs = []
-            
             sCNN_out = self.sCNN[0](self.inputs[2])
-            # Poolingによる重み付き和
-            if self.pools[0]!=None:
-                gapAttention0 = K.expand_dims(self.pools[0](sCNN_out),axis=1)
-                gapAttention0 = K.expand_dims(gapAttention0,axis=1)
-                gapAttention0 = K.tile(gapAttention0,[1,self.img_rows,self.img_cols,1])
-                sCNN_out = K.sum(sCNN_out*gapAttention0,axis=-1,keepdims=True)
+
+            # # Poolingによる重み付き和
+            # if self.pools[0]!=None:
+            #     gapAttention0 = K.expand_dims(self.pools[0](sCNN_out),axis=1)
+            #     gapAttention0 = K.expand_dims(gapAttention0,axis=1)
+            #     gapAttention0 = K.tile(gapAttention0,[1,self.img_rows,self.img_cols,1])
+            #     sCNN_out = K.sum(sCNN_out*gapAttention0,axis=-1,keepdims=True)
 
             self.sCNN_outs.append(sCNN_out)
 
             for i in range(1, len(self.sCNN)):
                 sCNN_out = self.sCNN[i](sCNN_out)
-                if self.pools[i]!=None: # Poolingによる重み付き和
-                    devide = 2**i
-                    site_row = int(self.img_rows/devide)
-                    site_col = int(self.img_cols/devide)
-                    gapAttention = K.expand_dims(self.pools[i](sCNN_out),axis=1)
-                    gapAttention = K.expand_dims(gapAttention,axis=1)
-                    gapAttention = K.tile(gapAttention,[1,site_row,site_col,1])
-                    sum_sCNN_out = K.sum(sCNN_out*gapAttention,axis=-1,keepdims=True)
-                    self.sCNN_outs.append(sum_sCNN_out)
-                else:
-                    self.sCNN_outs.append(sCNN_out)
-
+                # if self.pools[i]!=None: # Poolingによる重み付き和
+                #     # devide = 2**i
+                #     # site_row = int(self.img_rows/devide)
+                #     # site_col = int(self.img_cols/devide)
+                #     # gapAttention = K.expand_dims(self.pools[i](sCNN_out),axis=1)
+                #     # gapAttention = K.expand_dims(gapAttention,axis=1)
+                #     # gapAttention = K.tile(gapAttention,[1,site_row,site_col,1])
+                #     # sum_sCNN_out = K.sum(sCNN_out*gapAttention,axis=-1,keepdims=True)
+                #     sum_SCNN_out = K.mean(sCNN_out, axis=3, keepdims=True)
+                #     self.sCNN_outs.append(sum_SCNN_out)
+                # else:
+                #     self.sCNN_outs.append(sCNN_out)
+                self.sCNN_outs.append(sCNN_out)
             # pdb.set_trace()
         #==================================================
 
@@ -926,17 +831,34 @@ class PKConvUnet(object):
 
     # partialConvolution 自体の損失関数
     def loss_origin(self,mask):
+        
         def original(y_true,y_pred):
 
+            # 観測値部分の誤差
             l1 = self.loss_valid(mask, y_true, y_pred)
-            l2 = self.loss_hole(mask, y_true, y_pred)
+
+            # e_mask ＝ 欠損部（陸地）：０　観測点：１　海域部：１（海洋部を損失に加えない）
+            # mask = 0,1,0   exist_img = 1,1,0   1-exist_img = 0,0,1
+            if self.existOff:
+                if self.maskGaus is None:
+                    e_mask = mask+(1-self.exist_img)
+                else:
+                    e_mask = mask+(1-self.expand_exist_img)
+            else:
+                e_mask = mask
+
+            # 欠損部の誤差
+            l2 = self.loss_hole(e_mask, y_true, y_pred)
             
-            y_comp = mask * y_true + (1-mask) * y_pred
-            l3 = self.loss_tv(mask, y_comp)
+            # 欠損部のまわり1pxの誤差
+            y_comp = e_mask * y_true + (1-e_mask) * y_pred
+            l3 = self.loss_tv(e_mask, y_comp)
 
-            res = l1+6*l2
+            w1,w2,w3 = self.lossWeights
 
-            return tf.add(res,0.1*l3,name="loss_origin")
+            res = w1*l1+w2*l2
+
+            return tf.add(res,w3*l3,name="loss_origin")
             
         return original
 
@@ -960,8 +882,8 @@ class PKConvUnet(object):
         P = dilated_mask * y_comp
 
         # Calculate total variation loss
-        a = self.l1(P[:,1:,:,:], P[:,:-1,:,:])
-        b = self.l1(P[:,:,1:,:], P[:,:,:-1,:])
+        a = self.l1(P[:,1:,:,:], P[:,:-1,:,:])# 横に1pxずらした誤差
+        b = self.l1(P[:,:,1:,:], P[:,:,:-1,:])# 縦に1pxずらした誤差
         return a+b
 
     def fit_generator(self, generator, *args, **kwargs):
@@ -976,15 +898,21 @@ class PKConvUnet(object):
 
     def load(self, filepath, train_bn=True, lr=0.0002):
         # Load weights into model
-        epoch = int(os.path.basename(filepath).split('.')[1].split('-')[0])
-        assert epoch > 0, "Could not parse weight file. Should include the epoch"
-        self.current_epoch = epoch
+        epoch = os.path.basename(filepath).split('.')[1].split('-')[0]
+        try:
+            epoch = int(epoch)
+        except ValueError:
+            self.current_epoch = 100
+        else:
+            self.current_epoch = epoch
+
         self.model.load_weights(filepath)
 
-    @staticmethod
-    def PSNR(y_true, y_pred):
+    # @staticmethod
+    def PSNR(self,y_true, y_pred):
+        pred = y_pred*self.exist_img
         #return 20 * K.log(4.75) / K.log(10.0) - 10.0 * K.log(K.mean(K.square(y_pred - y_true))) / K.log(10.0)
-        return - 10.0 * K.log(K.mean(K.square(y_pred - y_true))) / K.log(10.0)
+        return - 10.0 * K.log(K.mean(K.square(pred - y_true))) / K.log(10.0)
 
     @staticmethod
     def current_timestamp():
