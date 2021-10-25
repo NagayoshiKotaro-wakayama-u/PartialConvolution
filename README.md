@@ -45,10 +45,13 @@ PartialConvolution/
                  ┗ generateToyData.py
 ```
   
-To train normal PartialConvolution model, use `-KLoff` option.  
-`python main.py xxxx -KLoff`  
-  
-If you want to get more details, use `-h` option.   
+To train normal PartialConvolution model. 
+`python main.py xxxx`
+
+To train with EarlyStopping, use `-es` option.
+`python main.py -es`
+
+If you want to get more details about option, use `-h` option.   
 `python main.py -h`  
   
   
@@ -56,8 +59,8 @@ If you want to get more details, use `-h` option.
 After training, run this command to test the model.  
 `python test.py xxxx yyyy`  
 xxxx is the name of experiment. yyyy is the epoch of the weight file to be loaded.  
-For example (epoch58 will be loaded)
-`python test.py KLPConv 58`
+For example (epoch50 will be loaded)
+`python test.py xxxx 50`
   
 The directory `result` is automatically created under `experiment` when you run this command.  
   
